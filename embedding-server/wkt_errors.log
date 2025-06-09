@@ -1,0 +1,94 @@
+
+      ORIGINAL: [-80.920048, 35.81795], [-72.116593, 35.81795], [-72.116593, 43.498941], [-80.920048, 43.498941], [-80.920048, 35.81795]
+      ERROR: Unsupported geometry type: [-80.920048, 35.81795], [-72.116593, 35.81795], [-72.116593, 43.498941], [-80.920048, 43.498941], [-80.920048, 35.81795]
+    
+      ORIGINAL: [-80.920048, 35.81795], [-72.116593, 35.81795], [-72.116593, 43.498941], [-80.920048, 43.498941], [-80.920048, 35.81795]
+      ERROR: Unsupported geometry type: [-80.920048, 35.81795], [-72.116593, 35.81795], [-72.116593, 43.498941], [-80.920048, 43.498941], [-80.920048, 35.81795]
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: 40.1164841, -88.2430932
+      ERROR: Unsupported geometry type: 40.1164841, -88.2430932
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT (POINT ())
+      ERROR: Invalid POINT coordinates: POINT (POINT ())
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ())))))))))))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ())))))))))))
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ())))))))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ())))))))
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ())))))))))))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ())))))))))))
+    
+      ORIGINAL: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ())))))))))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ())))))))))
+    
+      ORIGINAL: POINT (POINT (POINT (POINT (POINT ()))))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT (POINT (POINT ()))))
+    
+      ORIGINAL: POINT (POINT (POINT (POINT (POINT (POINT ())))))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT (POINT (POINT (POINT ())))))
+    
+      ORIGINAL: POINT (POINT (POINT (POINT (POINT (POINT ())))))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT (POINT (POINT (POINT ())))))
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT (POINT ())
+      ERROR: Invalid POINT coordinates: POINT (POINT ())
+    
+      ORIGINAL: POINT (POINT (POINT ()))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT ()))
+    
+      ORIGINAL: POINT (POINT (POINT (POINT ())))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT (POINT ())))
+    
+      ORIGINAL: POINT (POINT ())
+      ERROR: Invalid POINT coordinates: POINT (POINT ())
+    
+      ORIGINAL: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ()))))))))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT (POINT ()))))))))
+    
+      ORIGINAL: POINT (POINT (POINT ()))
+      ERROR: Invalid POINT coordinates: POINT (POINT (POINT ()))
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
+      ORIGINAL: POINT ()
+      ERROR: Invalid POINT coordinates: POINT ()
+    
