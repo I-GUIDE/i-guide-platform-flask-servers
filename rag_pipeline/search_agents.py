@@ -14,7 +14,7 @@ from neo4j import Driver, GraphDatabase
 from neo4j.graph import Node as _Neo4jNode
 from opensearchpy import OpenSearch
 
-import search_core
+import rag_pipeline.search_core as search_core
 
 # ---------- logging ----------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
