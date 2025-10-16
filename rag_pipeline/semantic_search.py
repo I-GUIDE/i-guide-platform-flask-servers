@@ -1,12 +1,13 @@
 import os
 import logging
-from sentence_transformers import SentenceTransformer
-from opensearchpy import OpenSearch
-from typing import List, Dict, Any
 import time
 import asyncio
-import aiohttp 
+from typing import Any, Dict, List, MutableMapping, Optional
+
+import aiohttp
 from flask import Flask, request, jsonify
+from opensearchpy import OpenSearch
+from sentence_transformers import SentenceTransformer
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -24,24 +25,6 @@ client = OpenSearch(
     use_ssl=False,
     verify_certs=False,  
 )
-
-class EvidenceStore:
-    def __init__(self):
-        self.evidence = []
-
-    def add(self, doc_id: str, score: float, source: Dict[str, Any]):
-        entry = {
-            'doc_id': doc_id,
-            'score': score,
-            'source': source,
-            'timestamp': time.time()
-        }
-        self.evidence.append(entry)
-
-    def get_all(self):
-        return self.evidence
-
-evidence_store = EvidenceStore()
 
 async def get_embedding_from_flask(user_query):
     flask_url = os.getenv("FLASK_EMBEDDING_URL")
@@ -115,8 +98,6 @@ def semantic_search(query: str, size: int = 12) -> List[Dict[str, Any]]:
                     'text': chunk_source.get('text')
                 }
 
-        evidence_store.add(doc_id, score, source)
-
         results.append({
             '_id': doc_id,
             '_score': score,
@@ -126,3 +107,35 @@ def semantic_search(query: str, size: int = 12) -> List[Dict[str, Any]]:
     end_time = time.time()
     logger.info(f"Semantic search completed in {end_time - start_time:.2f} seconds")
     return results
+
+
+# --- State-aligned helper ---
+from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+
+
+def run_semantic_search(
+    state: MutableMapping[str, Any],
+    *,
+    query: Optional[str] = None,
+    limit: int = 12,
+    max_total: Optional[int] = None,
+    dedupe: bool = True,
+    source: str = "semantic",
+) -> List[EvidenceEntry]:
+    ensure_state_shapes(state)
+    actual_query = (query or get_query_text(state)).strip()
+    if not actual_query:
+        logger.debug("Semantic search skipped: empty query.")
+        return []
+
+    hits = semantic_search(actual_query, size=limit)
+    if not hits:
+        return []
+
+    return merge_retrieval(
+        state,
+        source=source,
+        hits=hits,
+        limit=max_total,
+        dedupe=dedupe,
+    )

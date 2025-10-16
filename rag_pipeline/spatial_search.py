@@ -123,41 +123,38 @@ def spatial_search(coords, keyword=None, relation='INTERSECTS', limit='unlimited
             'track_total_hits': True
         }
 
-        # Execute query
         if str(limit).isdigit():
             size = int(limit)
             response = client.search(index=INDEX_NAME, body={**search_body, 'size': size})
             hits = response['hits']['hits']
         else:
             hits = scroll_all_documents(search_body)
-        '''
-        elements = [{
-            'id': hit['_id'],
-            'authors': hit['_source'].get('authors', 'Unknown'),
-            'title': hit['_source'].get('title', 'Untitled'),
-            'resource-type': hit['_source'].get('resource-type'),
-            'contents': hit['_source'].get('contents', 'No description available'),
-            'contributor': hit['_source'].get('contributor', 'Unknown'),
-            'thumbnail-image': hit['_source'].get('thumbnail-image'),
-            'bounding-box': hit['_source'].get('spatial-bounding-box-geojson'),
-            'centroid': hit['_source'].get('spatial-centroid')
-        } for hit in hits]
-        '''
 
-        elements = [{
-            "score": hit.get('_score', 0.0),
-            "document": {
-                "_source": {
-                    "doc_id": hit.get('_id'),
-                    "element_type": hit['_source'].get('resource-type'),
-                    "title": hit['_source'].get('title', 'Untitled'),
-                    "contents": hit['_source'].get('contents', 'No description available')
-                }
+        normalized_hits = []
+        for hit in hits:
+            source = hit.get('_source', {}) or {}
+            doc_id = hit.get('_id')
+            normalized_source = {
+                "doc_id": doc_id,
+                "element_type": source.get('resource-type') or source.get('element_type'),
+                "title": source.get('title', 'Untitled'),
+                "contents": source.get('contents', 'No description available'),
+                "contributor": source.get('contributor'),
+                "authors": source.get('authors'),
+                "tags": source.get('tags'),
+                "thumbnail-image": source.get('thumbnail-image'),
+                "spatial-bounding-box-geojson": source.get('spatial-bounding-box-geojson'),
+                "spatial-centroid": source.get('spatial-centroid'),
             }
-        } for hit in hits]
-  
+            normalized_hits.append(
+                {
+                    "_id": doc_id,
+                    "_score": hit.get('_score', 0.0),
+                    "_source": normalized_source,
+                }
+            )
 
-        return elements
+        return normalized_hits
 
     except Exception as e:
         print(f"[ERROR] Spatial search failed: {e}")

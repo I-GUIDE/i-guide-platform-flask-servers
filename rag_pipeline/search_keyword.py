@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, MutableMapping, Optional
 
 from opensearchpy import OpenSearch
 
 from .search_utils import get_logger, getenv, normalize_source_fields, safe_score
+from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 log = get_logger("search_keyword")
 
@@ -84,4 +85,32 @@ def get_keyword_search_results(
     return results
 
 
-__all__ = ["get_keyword_search_results"]
+def run_keyword_search(
+    state: MutableMapping[str, Any],
+    *,
+    query: Optional[str] = None,
+    limit: int = 12,
+    max_total: Optional[int] = None,
+    dedupe: bool = True,
+    source: str = "keyword",
+) -> List[EvidenceEntry]:
+    ensure_state_shapes(state)
+    actual_query = (query or get_query_text(state)).strip()
+    if not actual_query:
+        log.debug("Keyword search skipped: empty query.")
+        return []
+
+    hits = get_keyword_search_results(actual_query, size=limit)
+    if not hits:
+        return []
+
+    return merge_retrieval(
+        state,
+        source=source,
+        hits=hits,
+        limit=max_total,
+        dedupe=dedupe,
+    )
+
+
+__all__ = ["get_keyword_search_results", "run_keyword_search"]

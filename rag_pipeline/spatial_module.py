@@ -1,9 +1,9 @@
 import os
 import logging
 import requests
+import spacy
 from opensearchpy import OpenSearch
-import spacy  
-#import geograpy
+from typing import Any, Dict, List, MutableMapping, Optional
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -138,3 +138,34 @@ def get_spatial_search_results(user_query: str, size: int = 10):
     except Exception as e:
         logger.error(f"Error performing spatial search: {e}")
         return []
+
+
+from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+
+
+def run_spatial_search(
+    state: MutableMapping[str, Any],
+    *,
+    query: Optional[str] = None,
+    limit: int = 10,
+    max_total: Optional[int] = None,
+    dedupe: bool = True,
+    source: str = "spatial",
+) -> List[EvidenceEntry]:
+    ensure_state_shapes(state)
+    actual_query = (query or get_query_text(state)).strip()
+    if not actual_query:
+        logger.debug("Spatial search skipped: empty query.")
+        return []
+
+    hits = get_spatial_search_results(actual_query, size=limit)
+    if not isinstance(hits, list) or not hits:
+        return []
+
+    return merge_retrieval(
+        state,
+        source=source,
+        hits=hits,
+        limit=max_total,
+        dedupe=dedupe,
+    )

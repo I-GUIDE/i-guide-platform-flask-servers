@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, MutableMapping, Optional
 
 from neo4j import Driver, GraphDatabase
 from neo4j.graph import Node as _Neo4jNode
 
 from .search_utils import get_logger, getenv, normalize_source_fields, safe_score
+from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 log = get_logger("search_neo4j")
 
@@ -131,4 +132,32 @@ def get_neo4j_search_results(
     return _records_to_hits(records)
 
 
-__all__ = ["get_neo4j_search_results"]
+def run_neo4j_search(
+    state: MutableMapping[str, Any],
+    *,
+    query: Optional[str] = None,
+    limit: int = 12,
+    max_total: Optional[int] = None,
+    dedupe: bool = True,
+    source: str = "neo4j",
+) -> List[EvidenceEntry]:
+    ensure_state_shapes(state)
+    actual_query = (query or get_query_text(state)).strip()
+    if not actual_query:
+        log.debug("Neo4j search skipped: empty query.")
+        return []
+
+    hits = get_neo4j_search_results(actual_query, limit=limit)
+    if not hits:
+        return []
+
+    return merge_retrieval(
+        state,
+        source=source,
+        hits=hits,
+        limit=max_total,
+        dedupe=dedupe,
+    )
+
+
+__all__ = ["get_neo4j_search_results", "run_neo4j_search"]

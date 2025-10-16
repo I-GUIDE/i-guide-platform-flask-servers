@@ -1,2 +1,3 @@
 embedding-server/.env
 rag_pipeline/.env
+rag_pipeline/.env.local

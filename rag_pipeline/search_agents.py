@@ -7,7 +7,7 @@ import os
 import re
 import time
 from functools import lru_cache, wraps
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, MutableMapping, Optional, Tuple
 
 import requests
 from neo4j import Driver, GraphDatabase
@@ -15,6 +15,7 @@ from neo4j.graph import Node as _Neo4jNode
 from opensearchpy import OpenSearch
 
 import rag_pipeline.search_core as search_core
+from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 # ---------- logging ----------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -613,6 +614,34 @@ get_keyword_search_results = search_core.get_keyword_search_results
 get_basic_neo4j_search_results = search_core.get_neo4j_search_results
 
 
+def run_agent_search(
+    state: MutableMapping[str, Any],
+    *,
+    query: Optional[str] = None,
+    limit: int = 12,
+    max_total: Optional[int] = None,
+    dedupe: bool = True,
+    source: str = "agent",
+) -> List[EvidenceEntry]:
+    ensure_state_shapes(state)
+    actual_query = (query or get_query_text(state)).strip()
+    if not actual_query:
+        log.debug("Agent search skipped: empty query.")
+        return []
+
+    hits = get_opensearch_agent_results(actual_query, limit=limit)
+    if not hits:
+        return []
+
+    return merge_retrieval(
+        state,
+        source=source,
+        hits=hits,
+        limit=max_total,
+        dedupe=dedupe,
+    )
+
+
 __all__ = [
     "get_keyword_search_results",
     "get_basic_neo4j_search_results",
@@ -622,4 +651,5 @@ __all__ = [
     "get_comprehensive_schema",
     "agent_search_with_llm",
     "agent_spatial_temporal_search_with_llm",
+    "run_agent_search",
 ]
