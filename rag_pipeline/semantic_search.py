@@ -1,56 +1,86 @@
 import os
-import logging
 import time
-import asyncio
+from functools import lru_cache
 from typing import Any, Dict, List, MutableMapping, Optional
 
-import aiohttp
-from flask import Flask, request, jsonify
+import requests
+from flask import Flask, jsonify, request
 from opensearchpy import OpenSearch
-from sentence_transformers import SentenceTransformer
 
 from dotenv import load_dotenv
+
+from .search_utils import get_logger, getenv
+
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 app = Flask(__name__)
 
 
-#model = SentenceTransformer('all-MiniLM-L6-v2')
+@lru_cache(maxsize=1)
+def _os_client() -> OpenSearch:
+    node = getenv("OPENSEARCH_NODE")
+    user = getenv("OPENSEARCH_USERNAME", required=False, default="")
+    pwd = getenv("OPENSEARCH_PASSWORD", required=False, default="")
+    use_ssl = node.lower().startswith("https")
+    return OpenSearch(
+        hosts=[node],
+        http_auth=(user, pwd) if (user or pwd) else None,
+        use_ssl=use_ssl,
+        verify_certs=False,
+        ssl_assert_hostname=False,
+        ssl_show_warn=False,
+        timeout=30,
+        max_retries=2,
+        retry_on_timeout=True,
+    )
 
-client = OpenSearch(
-    hosts=[{'host': os.getenv('OPENSEARCH_NODE'), 'port': 9200}],
-    http_auth=(os.getenv('OPENSEARCH_USERNAME'), os.getenv('OPENSEARCH_PASSWORD')),
-    use_ssl=False,
-    verify_certs=False,  
-)
 
-async def get_embedding_from_flask(user_query):
-    flask_url = os.getenv("FLASK_EMBEDDING_URL")
+def _os_index() -> str:
+    return getenv("OPENSEARCH_INDEX")
+
+
+def _fetch_embedding_from_service(user_query: str) -> Optional[List[float]]:
+    flask_url = (os.getenv("FLASK_EMBEDDING_URL") or "").rstrip("/")
     if not flask_url:
         logger.error("FLASK_EMBEDDING_URL environment variable not set.")
         return None
 
-    url = f"{flask_url}/get_embedding"
-    payload = {"text": user_query}
-
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    raise Exception(f"Error from Flask server: {response.status}")
-                data = await response.json()
-                return data.get("embedding")
-    except Exception as e:
-        logger.error("Error getting embedding from Flask server: %s", e)
+        response = requests.post(
+            f"{flask_url}/get_embedding",
+            json={"text": user_query},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        embedding = payload.get("embedding")
+        if isinstance(embedding, list):
+            return embedding
+        logger.error("Embedding payload missing 'embedding': %s", payload)
+    except Exception as exc:
+        logger.error("Error getting embedding from Flask server: %s", exc)
+    return None
+
+
+def get_embedding(user_query: str) -> Optional[List[float]]:
+    query = (user_query or "").strip()
+    if not query:
         return None
+    return _fetch_embedding_from_service(query)
 
 
-@app.route('/get_embedding', methods=['POST'])
-def get_embedding(text: str) -> List[float]:
-    logger.info(f"Fetching embedding from Flask server for input text")
-    return asyncio.run(get_embedding_from_flask(text))
+@app.route("/get_embedding", methods=["POST"])
+def get_embedding_endpoint():
+    payload = request.get_json(silent=True) or {}
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text is required"}), 400
+
+    embedding = get_embedding(text)
+    if embedding is None:
+        return jsonify({"error": "embedding service unavailable"}), 503
+    return jsonify({"embedding": embedding})
 
 def semantic_search(query: str, size: int = 12) -> List[Dict[str, Any]]:
     start_time = time.time()
@@ -62,8 +92,8 @@ def semantic_search(query: str, size: int = 12) -> List[Dict[str, Any]]:
         return []
 
     try:
-        response = client.search(
-            index=os.getenv('OPENSEARCH_INDEX'),
+        response = _os_client().search(
+            index=_os_index(),
             body={
                 "size": size,
                 "query": {
@@ -109,6 +139,25 @@ def semantic_search(query: str, size: int = 12) -> List[Dict[str, Any]]:
     return results
 
 
+def retrieve_semantic(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Execute semantic retrieval using the query stored in the shared state.
+    """
+    ensure_state_shapes(state)
+    query = get_query_text(state).strip()
+    if not query:
+        logger.debug("Semantic retriever skipped: empty query.")
+        return []
+
+    params = state.get("params") or {}
+    try:
+        size = int(params.get("top_k", 8))
+    except (TypeError, ValueError):
+        size = 8
+
+    return semantic_search(query, size=size)
+
+
 # --- State-aligned helper ---
 from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
@@ -139,3 +188,6 @@ def run_semantic_search(
         limit=max_total,
         dedupe=dedupe,
     )
+
+
+__all__ = ["semantic_search", "run_semantic_search", "retrieve_semantic"]

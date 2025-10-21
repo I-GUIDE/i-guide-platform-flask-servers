@@ -3,9 +3,6 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any, Dict, List, MutableMapping, Optional
 
-from neo4j import Driver, GraphDatabase
-from neo4j.graph import Node as _Neo4jNode
-
 from .search_utils import get_logger, getenv, normalize_source_fields, safe_score
 from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
@@ -13,7 +10,22 @@ log = get_logger("search_neo4j")
 
 
 @lru_cache(maxsize=1)
-def _neo4j_driver() -> Driver:
+def _neo4j_components() -> Optional[Dict[str, Any]]:
+    try:
+        from neo4j import GraphDatabase
+        from neo4j.graph import Node as Neo4jNode
+    except Exception as exc:  # pragma: no cover - optional dependency
+        log.debug("Neo4j driver unavailable: %s", exc)
+        return None
+    return {"GraphDatabase": GraphDatabase, "Node": Neo4jNode}
+
+
+@lru_cache(maxsize=1)
+def _neo4j_driver() -> Optional[Any]:
+    components = _neo4j_components()
+    if not components:
+        return None
+
     uri = (
         getenv("NEO4J_CONNECTION_STRING", required=False)
         or getenv("NEO4J_URI", required=False)
@@ -25,7 +37,12 @@ def _neo4j_driver() -> Driver:
         or getenv("NEO4J_USER")
     )
     password = getenv("NEO4J_PASSWORD")
-    return GraphDatabase.driver(uri, auth=(user, password), max_connection_lifetime=300)
+    GraphDatabase = components["GraphDatabase"]
+    try:
+        return GraphDatabase.driver(uri, auth=(user, password), max_connection_lifetime=300)
+    except Exception as exc:
+        log.error("Failed to create Neo4j driver: %s", exc)
+        return None
 
 
 def _neo4j_db() -> Optional[str]:
@@ -33,9 +50,13 @@ def _neo4j_db() -> Optional[str]:
     return value or None
 
 
-def _neo4j_run(cypher: str, params: Dict[str, Any], driver: Optional[Driver] = None) -> List[Dict[str, Any]]:
+def _neo4j_run(cypher: str, params: Dict[str, Any], driver: Optional[Any] = None) -> List[Dict[str, Any]]:
+    db_driver = driver or _neo4j_driver()
+    if db_driver is None:
+        return []
+
     database = _neo4j_db()
-    session_factory = (driver or _neo4j_driver()).session
+    session_factory = db_driver.session
     with (session_factory(database=database) if database else session_factory()) as session:
         return list(session.run(cypher, **params))
 
@@ -63,20 +84,23 @@ def _build_neo4j_keyword_cypher() -> str:
     """
 
 
-def _extract_node_from_record(record: Dict[str, Any]) -> Optional[_Neo4jNode]:
+def _extract_node_from_record(record: Dict[str, Any], node_cls: Optional[type]) -> Optional[Any]:
     node = record.get("node")
-    if isinstance(node, _Neo4jNode):
+    if node_cls and isinstance(node, node_cls):
         return node
     for value in record.values():
-        if isinstance(value, _Neo4jNode):
+        if node_cls and isinstance(value, node_cls):
             return value
     return None
 
 
 def _records_to_hits(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    components = _neo4j_components()
+    node_cls = components["Node"] if components else None
+
     hits: List[Dict[str, Any]] = []
     for idx, record in enumerate(records):
-        node = _extract_node_from_record(record)
+        node = _extract_node_from_record(record, node_cls)
         score = safe_score(record.get("score", 1.0))
 
         if node is not None:
@@ -101,7 +125,7 @@ def get_neo4j_search_results(
     user_query: str,
     limit: int = 12,
     *,
-    driver: Optional[Driver] = None,
+    driver: Optional[Any] = None,
     cypher: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -129,7 +153,29 @@ def get_neo4j_search_results(
         log.error("Neo4j keyword query failed: %s", exc)
         return []
 
+    if not records:
+        return []
+
     return _records_to_hits(records)
+
+
+def retrieve_neo4j(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Execute the Neo4j retriever and return raw hits.
+    """
+    ensure_state_shapes(state)
+    query = get_query_text(state).strip()
+    if not query:
+        log.debug("Neo4j retriever skipped: empty query.")
+        return []
+
+    params = state.get("params") or {}
+    try:
+        limit = int(params.get("top_k", 8))
+    except (TypeError, ValueError):
+        limit = 8
+
+    return get_neo4j_search_results(query, limit=limit)
 
 
 def run_neo4j_search(
@@ -160,4 +206,4 @@ def run_neo4j_search(
     )
 
 
-__all__ = ["get_neo4j_search_results", "run_neo4j_search"]
+__all__ = ["get_neo4j_search_results", "run_neo4j_search", "retrieve_neo4j"]

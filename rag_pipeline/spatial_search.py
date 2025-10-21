@@ -1,23 +1,47 @@
 import json
-import os
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from functools import lru_cache
+from typing import Any, Dict, List, MutableMapping, Optional
+
+from flask import Flask, jsonify, request
+try:
+    from flask_cors import CORS
+except Exception:  # pragma: no cover - optional dependency
+    def CORS(app):  # type: ignore
+        return app
 from opensearchpy import OpenSearch
 from dotenv import load_dotenv
 
+from .search_utils import get_logger, getenv
+from .state import ensure_state_shapes, get_query_text
+
 load_dotenv()
 
+logger = get_logger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-client = OpenSearch(
-    hosts=[{'host': os.getenv('OPENSEARCH_NODE'), 'port': 9200}],
-    http_auth=(os.getenv('OPENSEARCH_USERNAME'), os.getenv('OPENSEARCH_PASSWORD')),
-    use_ssl=False,
-    verify_certs=False
-)
 
-INDEX_NAME = os.getenv('OPENSEARCH_INDEX')
+@lru_cache(maxsize=1)
+def _os_client() -> OpenSearch:
+    node = getenv("OPENSEARCH_NODE")
+    user = getenv("OPENSEARCH_USERNAME", required=False, default="")
+    pwd = getenv("OPENSEARCH_PASSWORD", required=False, default="")
+    use_ssl = node.lower().startswith("https")
+    return OpenSearch(
+        hosts=[node],
+        http_auth=(user, pwd) if (user or pwd) else None,
+        use_ssl=use_ssl,
+        verify_certs=False,
+        ssl_assert_hostname=False,
+        ssl_show_warn=False,
+        timeout=30,
+        max_retries=2,
+        retry_on_timeout=True,
+    )
+
+
+def _os_index() -> str:
+    return getenv("OPENSEARCH_INDEX")
 
 
 def infer_geo_shape(coords_array):
@@ -60,7 +84,9 @@ def infer_geo_shape(coords_array):
 
 def scroll_all_documents(search_body, scroll_duration='30s'):
     all_hits = []
-    response = client.search(index=INDEX_NAME, body=search_body, scroll=scroll_duration)
+    client = _os_client()
+    index = _os_index()
+    response = client.search(index=index, body=search_body, scroll=scroll_duration)
     scroll_id = response.get('_scroll_id')
 
     while True:
@@ -77,7 +103,7 @@ def scroll_all_documents(search_body, scroll_duration='30s'):
         try:
             client.clear_scroll(scroll_id=scroll_id)
         except Exception as e:
-            print(f"[Warning] Failed to clear scroll: {e}")
+            logger.warning("Failed to clear OpenSearch scroll: %s", e)
 
     return all_hits
 
@@ -93,7 +119,7 @@ def spatial_search(coords, keyword=None, relation='INTERSECTS', limit='unlimited
             return {'error': 'Missing required parameter: coords'}
 
         shape = infer_geo_shape(coords_array)
-        print(f"[DEBUG] Inferred shape: {shape}")
+        logger.debug("Inferred geo shape: %s", shape)
 
         filters = [{
             'geo_shape': {
@@ -125,12 +151,12 @@ def spatial_search(coords, keyword=None, relation='INTERSECTS', limit='unlimited
 
         if str(limit).isdigit():
             size = int(limit)
-            response = client.search(index=INDEX_NAME, body={**search_body, 'size': size})
+            response = _os_client().search(index=_os_index(), body={**search_body, 'size': size})
             hits = response['hits']['hits']
         else:
             hits = scroll_all_documents(search_body)
 
-        normalized_hits = []
+        normalized_hits: List[Dict[str, Any]] = []
         for hit in hits:
             source = hit.get('_source', {}) or {}
             doc_id = hit.get('_id')
@@ -157,7 +183,7 @@ def spatial_search(coords, keyword=None, relation='INTERSECTS', limit='unlimited
         return normalized_hits
 
     except Exception as e:
-        print(f"[ERROR] Spatial search failed: {e}")
+        logger.error("Spatial search failed: %s", e)
         return {'error': str(e)}
 
 
@@ -184,7 +210,65 @@ def spatial_search_endpoint():
         return jsonify(result)
 
     except Exception as e:
-        print(f"[ERROR] Endpoint exception: {e}")
+        logger.error("Spatial search endpoint error: %s", e)
         return jsonify({'error': str(e)}), 500
 
-app.run(debug=True)
+if __name__ == "__main__":
+    app.run(debug=True)
+
+
+def _extract_spatial_config(state: MutableMapping[str, Any]) -> Dict[str, Any]:
+    session_ctx = state.get("session_context") or {}
+    config = session_ctx.get("spatial_search") or {}
+    if not isinstance(config, dict):
+        config = {}
+    return config
+
+
+def retrieve_spatial(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Retrieve spatially filtered documents using configuration from the shared state.
+    """
+    ensure_state_shapes(state)
+    config = _extract_spatial_config(state)
+
+    coords = (
+        config.get("coords")
+        or state.get("session_context", {}).get("spatial_coords")
+        or state.get("params", {}).get("spatial_coords")
+    )
+    if not coords:
+        logger.debug("Spatial retriever skipped: missing coordinates.")
+        return []
+
+    keyword = config.get("keyword")
+    if keyword is None:
+        keyword = get_query_text(state) or None
+
+    relation = config.get("relation", "INTERSECTS")
+    if not isinstance(relation, str):
+        relation = "INTERSECTS"
+
+    limit_value: Any = config.get("limit")
+    if limit_value is None:
+        limit_value = state.get("params", {}).get("top_k", 8)
+
+    element_type = config.get("element_type")
+
+    result = spatial_search(
+        coords,
+        keyword=keyword,
+        relation=relation,
+        limit=limit_value,
+        element_type=element_type,
+    )
+
+    if isinstance(result, list):
+        return result
+
+    if isinstance(result, dict) and result.get("error"):
+        logger.debug("Spatial retriever error suppressed: %s", result["error"])
+    return []
+
+
+__all__ = ["spatial_search", "retrieve_spatial"]

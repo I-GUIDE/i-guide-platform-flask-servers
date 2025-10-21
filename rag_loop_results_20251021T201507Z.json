@@ -1,0 +1,77 @@
+[
+  {
+    "key": "flood_map_md",
+    "mode": "keyword_only",
+    "query": "What does the Flood Risk Map of Washington County, Maryland show?",
+    "retrieval_summary": {
+      "count": 0,
+      "sources": {}
+    },
+    "answer": {
+      "text": "I could not find evidence for \"What does the Flood Risk Map of Washington County, Maryland show?\". Try narrowing with a location, time range, or data source keyword.",
+      "citations": [],
+      "confidence": 0.1
+    },
+    "evidence_sample": []
+  },
+  {
+    "key": "wildfire_tx",
+    "mode": "keyword_only",
+    "query": "How did wildfires impact building losses in Texas according to the I-GUIDE project?",
+    "retrieval_summary": {
+      "count": 0,
+      "sources": {}
+    },
+    "answer": {
+      "text": "I could not find evidence for \"How did wildfires impact building losses in Texas according to the I-GUIDE project?\". Try narrowing with a location, time range, or data source keyword.",
+      "citations": [],
+      "confidence": 0.1
+    },
+    "evidence_sample": []
+  },
+  {
+    "key": "geomapclip",
+    "mode": "keyword_only",
+    "query": "What is GeoMapCLIP and what is it used for?",
+    "retrieval_summary": {
+      "count": 0,
+      "sources": {}
+    },
+    "answer": {
+      "text": "I could not find evidence for \"What is GeoMapCLIP and what is it used for?\". Try narrowing with a location, time range, or data source keyword.",
+      "citations": [],
+      "confidence": 0.1
+    },
+    "evidence_sample": []
+  },
+  {
+    "key": "blue_water",
+    "mode": "keyword_only",
+    "query": "How does the I-GUIDE Summer School 2024 team estimate blue water footprints of reservoirs in the US-Mexico region?",
+    "retrieval_summary": {
+      "count": 0,
+      "sources": {}
+    },
+    "answer": {
+      "text": "I could not find evidence for \"How does the I-GUIDE Summer School 2024 team estimate blue water footprints of reservoirs in the US-Mexico region?\". Try narrowing with a location, time range, or data source keyword.",
+      "citations": [],
+      "confidence": 0.1
+    },
+    "evidence_sample": []
+  },
+  {
+    "key": "tx_census_losses",
+    "mode": "keyword_only",
+    "query": "Show the dataset on annual averaged building losses in Texas census tracts.",
+    "retrieval_summary": {
+      "count": 0,
+      "sources": {}
+    },
+    "answer": {
+      "text": "I could not find evidence for \"Show the dataset on annual averaged building losses in Texas census tracts.\". Try narrowing with a location, time range, or data source keyword.",
+      "citations": [],
+      "confidence": 0.1
+    },
+    "evidence_sample": []
+  }
+]

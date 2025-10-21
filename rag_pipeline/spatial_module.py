@@ -1,26 +1,54 @@
 import os
-import logging
-import requests
-import spacy
-from opensearchpy import OpenSearch
+from functools import lru_cache
 from typing import Any, Dict, List, MutableMapping, Optional
 
+import requests
+from opensearchpy import OpenSearch
+
 from dotenv import load_dotenv
+
+from .search_utils import get_logger, getenv
+
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
-nlp = spacy.load("en_core_web_sm")
+try:
+    import spacy
 
-client = OpenSearch(
-    hosts=[{'host': os.getenv('OPENSEARCH_NODE'), 'port': 9200}],
-    http_auth=(os.getenv('OPENSEARCH_USERNAME'), os.getenv('OPENSEARCH_PASSWORD')),
-    use_ssl=False,
-    verify_certs=False, 
-)
+    nlp = spacy.load("en_core_web_sm")
+except Exception as exc:  # pragma: no cover - optional dependency
+    logger.warning("Failed to load Spacy model 'en_core_web_sm': %s", exc)
+    nlp = None
+
+
+@lru_cache(maxsize=1)
+def _os_client() -> OpenSearch:
+    node = getenv("OPENSEARCH_NODE")
+    user = getenv("OPENSEARCH_USERNAME", required=False, default="")
+    pwd = getenv("OPENSEARCH_PASSWORD", required=False, default="")
+    use_ssl = node.lower().startswith("https")
+    return OpenSearch(
+        hosts=[node],
+        http_auth=(user, pwd) if (user or pwd) else None,
+        use_ssl=use_ssl,
+        verify_certs=False,
+        ssl_assert_hostname=False,
+        ssl_show_warn=False,
+        timeout=30,
+        max_retries=2,
+        retry_on_timeout=True,
+    )
+
+
+def _os_index() -> str:
+    return getenv("OPENSEARCH_INDEX")
 
 def extract_locations_from_query(user_query: str):
+    if nlp is None:
+        logger.debug("Spacy model unavailable; skipping spatial entity extraction.")
+        return []
+
     doc = nlp(user_query)
     locations = set()
     for ent in doc.ents:
@@ -127,8 +155,8 @@ def get_spatial_search_results(user_query: str, size: int = 10):
     }
 
     try:
-        response = client.search(
-            index=os.getenv('OPENSEARCH_INDEX'),
+        response = _os_client().search(
+            index=_os_index(),
             body=search_body
         )
         hits = response.get('hits', {}).get('hits', [])

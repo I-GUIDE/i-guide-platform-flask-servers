@@ -85,6 +85,25 @@ def get_keyword_search_results(
     return results
 
 
+def retrieve_keyword(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Execute the keyword retriever and return raw hits for downstream normalization.
+    """
+    ensure_state_shapes(state)
+    query = get_query_text(state).strip()
+    if not query:
+        log.debug("Keyword retriever skipped: empty query.")
+        return []
+
+    params = state.get("params") or {}
+    try:
+        size = int(params.get("top_k", 8))
+    except (TypeError, ValueError):
+        size = 8
+
+    return get_keyword_search_results(query, size=size)
+
+
 def run_keyword_search(
     state: MutableMapping[str, Any],
     *,
@@ -113,4 +132,4 @@ def run_keyword_search(
     )
 
 
-__all__ = ["get_keyword_search_results", "run_keyword_search"]
+__all__ = ["get_keyword_search_results", "run_keyword_search", "retrieve_keyword"]
