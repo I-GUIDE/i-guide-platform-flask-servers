@@ -1,11 +1,19 @@
-import json
 import os
+import json
+import logging
+import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from opensearchpy import OpenSearch
 from dotenv import load_dotenv
+import spacy
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+nlp = spacy.load("en_core_web_sm")
 
 app = Flask(__name__)
 CORS(app)
@@ -19,14 +27,7 @@ client = OpenSearch(
 
 INDEX_NAME = os.getenv('OPENSEARCH_INDEX')
 
-
 def infer_geo_shape(coords_array):
-    """
-    Infers a GeoJSON shape from coordinate pairs:
-      - 1 pair  => Point
-      - 2 pairs => Envelope (auto-normalized to top-left & bottom-right)
-      - ≥3 pairs => Polygon (auto-closed)
-    """
     if not isinstance(coords_array, list) or len(coords_array) == 0:
         raise ValueError('Coordinates must be a non-empty array of [lon, lat] pairs.')
 
@@ -35,23 +36,18 @@ def infer_geo_shape(coords_array):
             'type': 'point',
             'coordinates': coords_array[0]
         }
-
     elif len(coords_array) == 2:
         lon1, lat1 = coords_array[0]
         lon2, lat2 = coords_array[1]
-
         top_left = [min(lon1, lon2), max(lat1, lat2)]
         bottom_right = [max(lon1, lon2), min(lat1, lat2)]
-
         return {
             'type': 'envelope',
             'coordinates': [top_left, bottom_right]
         }
-
     else:
         if coords_array[0] != coords_array[-1]:
             coords_array.append(coords_array[0])
-
         return {
             'type': 'polygon',
             'coordinates': [coords_array]
@@ -67,9 +63,7 @@ def scroll_all_documents(search_body, scroll_duration='30s'):
         hits = response['hits']['hits']
         if not hits:
             break
-
         all_hits.extend(hits)
-
         response = client.scroll(scroll_id=scroll_id, scroll=scroll_duration)
         scroll_id = response.get('_scroll_id')
 
@@ -77,23 +71,30 @@ def scroll_all_documents(search_body, scroll_duration='30s'):
         try:
             client.clear_scroll(scroll_id=scroll_id)
         except Exception as e:
-            print(f"[Warning] Failed to clear scroll: {e}")
+            logger.warning(f"Failed to clear scroll: {e}")
 
     return all_hits
 
 
+def format_search_hits(hits):
+    return [{
+        "score": hit.get('_score', 0.0),
+        "document": {
+            "_source": {
+                "doc_id": hit.get('_id'),
+                "element_type": hit['_source'].get('resource-type'),
+                "title": hit['_source'].get('title', 'Untitled'),
+                "contents": hit['_source'].get('contents', 'No description available')
+            }
+        }
+    } for hit in hits]
+
+
+
 def spatial_search(coords, keyword=None, relation='INTERSECTS', limit='unlimited', element_type=None):
     try:
-        if isinstance(coords, str):
-            coords_array = json.loads(coords)
-        else:
-            coords_array = coords
-
-        if not coords_array:
-            return {'error': 'Missing required parameter: coords'}
-
+        coords_array = json.loads(coords) if isinstance(coords, str) else coords
         shape = infer_geo_shape(coords_array)
-        print(f"[DEBUG] Inferred shape: {shape}")
 
         filters = [{
             'geo_shape': {
@@ -103,12 +104,10 @@ def spatial_search(coords, keyword=None, relation='INTERSECTS', limit='unlimited
                 }
             }
         }]
-
         if element_type:
             filters.append({'term': {'resource-type': element_type}})
 
         bool_query = {'bool': {'filter': filters}}
-
         if keyword:
             bool_query['bool']['must'] = [{
                 'multi_match': {
@@ -123,45 +122,102 @@ def spatial_search(coords, keyword=None, relation='INTERSECTS', limit='unlimited
             'track_total_hits': True
         }
 
-        # Execute query
-        if str(limit).isdigit():
-            size = int(limit)
-            response = client.search(index=INDEX_NAME, body={**search_body, 'size': size})
-            hits = response['hits']['hits']
-        else:
-            hits = scroll_all_documents(search_body)
-        '''
-        elements = [{
-            'id': hit['_id'],
-            'authors': hit['_source'].get('authors', 'Unknown'),
-            'title': hit['_source'].get('title', 'Untitled'),
-            'resource-type': hit['_source'].get('resource-type'),
-            'contents': hit['_source'].get('contents', 'No description available'),
-            'contributor': hit['_source'].get('contributor', 'Unknown'),
-            'thumbnail-image': hit['_source'].get('thumbnail-image'),
-            'bounding-box': hit['_source'].get('spatial-bounding-box-geojson'),
-            'centroid': hit['_source'].get('spatial-centroid')
-        } for hit in hits]
-        '''
+        hits = (client.search(index=INDEX_NAME, body={**search_body, 'size': int(limit)})
+                ['hits']['hits'] if str(limit).isdigit()
+                else scroll_all_documents(search_body))
 
-        elements = [{
-            "score": hit.get('_score', 0.0),
-            "document": {
-                "_source": {
-                    "doc_id": hit.get('_id'),
-                    "element_type": hit['_source'].get('resource-type'),
-                    "title": hit['_source'].get('title', 'Untitled'),
-                    "contents": hit['_source'].get('contents', 'No description available')
-                }
-            }
-        } for hit in hits]
-  
-
-        return elements
+        return format_search_hits(hits)
 
     except Exception as e:
-        print(f"[ERROR] Spatial search failed: {e}")
+        logger.error(f"Spatial search failed: {e}")
         return {'error': str(e)}
+
+
+def extract_locations_from_query(user_query: str):
+    doc = nlp(user_query)
+    return list({ent.text for ent in doc.ents if ent.label_ in ("GPE", "LOC")})
+
+
+def get_bounding_box(location: str):
+    api_key = os.getenv('GOOGLE_MAPS_API_KEY')
+    if not api_key:
+        logger.error("Google Maps API key not set.")
+        return None
+
+    geocode_url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {'address': location, 'key': api_key}
+
+    try:
+        response = requests.get(geocode_url, params=params)
+        response.raise_for_status()
+        data = response.json()
+
+        if not data['results']:
+            logger.warning(f"No geocode results for location: {location}")
+            return None
+
+        geometry = data['results'][0]['geometry']
+        bounds = geometry.get('bounds') or geometry.get('viewport')
+        if not bounds:
+            lat = geometry['location']['lat']
+            lng = geometry['location']['lng']
+            buffer = 0.1
+            bounds = {
+                "southwest": {"lat": lat - buffer, "lng": lng - buffer},
+                "northeast": {"lat": lat + buffer, "lng": lng + buffer}
+            }
+
+        return {
+            "type": "polygon",
+            "coordinates": [[
+                [bounds["southwest"]["lng"], bounds["southwest"]["lat"]],
+                [bounds["northeast"]["lng"], bounds["southwest"]["lat"]],
+                [bounds["northeast"]["lng"], bounds["northeast"]["lat"]],
+                [bounds["southwest"]["lng"], bounds["northeast"]["lat"]],
+                [bounds["southwest"]["lng"], bounds["southwest"]["lat"]]
+            ]]
+        }
+
+    except requests.RequestException as e:
+        logger.error(f"Error fetching bounding box: {e}")
+        return None
+
+
+def get_spatial_search_results(user_query: str, size: int = 10):
+    locations = extract_locations_from_query(user_query)
+    if not locations:
+        return []
+
+    bounding_box = get_bounding_box(locations[0])
+    if not bounding_box:
+        return []
+
+    search_body = {
+        "query": {
+            "bool": {
+                "should": [{"match": {"title": user_query}}],
+                "filter": [{
+                    "geo_shape": {
+                        "spatial-bounding-box-geojson": {
+                            "shape": bounding_box,
+                            "relation": "INTERSECTS"
+                        }
+                    }
+                }]
+            }
+        },
+        "size": size
+    }
+
+    try:
+        response = client.search(index=INDEX_NAME, body=search_body)
+        hits = response.get('hits', {}).get('hits', [])
+        return format_search_hits(hits)
+    except Exception as e:
+        logger.error(f"Error performing NLP-based spatial search: {e}")
+        return []
+    
+    pass
 
 
 @app.route('/search/spatial', methods=['GET', 'OPTIONS'])
@@ -169,25 +225,33 @@ def spatial_search_endpoint():
     if request.method == 'OPTIONS':
         return '', 200
 
+    coords = request.args.get('coords')
+    keyword = request.args.get('keyword')
+    relation = request.args.get('relation', 'INTERSECTS')
+    limit = request.args.get('limit', 'unlimited')
+    element_type = request.args.get('element-type')
+
+    if not coords:
+        return jsonify({'error': 'Missing required query parameter: coords'}), 400
+
+    result = spatial_search(coords, keyword, relation, limit, element_type)
+    return jsonify(result), 200 if isinstance(result, list) else 500
+
+
+@app.route('/search/query', methods=['GET'])
+def query_location_search():
+    user_query = request.args.get('q')
+    size = request.args.get('size', 10)
+
+    if not user_query:
+        return jsonify({'error': 'Missing required query parameter: q'}), 400
+
     try:
-        coords = request.args.get('coords')
-        keyword = request.args.get('keyword')
-        relation = request.args.get('relation', 'INTERSECTS')
-        limit = request.args.get('limit', 'unlimited')
-        element_type = request.args.get('element-type')
-
-        if not coords:
-            return jsonify({'error': 'Missing required query parameter: coords'}), 400
-
-        result = spatial_search(coords, keyword, relation, limit, element_type)
-
-        if 'error' in result:
-            return jsonify(result), 400 if 'Missing' in result['error'] else 500
-
-        return jsonify(result)
-
+        results = get_spatial_search_results(user_query, size=int(size))
+        return jsonify(results)
     except Exception as e:
-        print(f"[ERROR] Endpoint exception: {e}")
+        logger.error(f"Query search failed: {e}")
         return jsonify({'error': str(e)}), 500
 
-app.run(debug=True)
+if __name__ == "__main__":
+    app.run(debug=True)

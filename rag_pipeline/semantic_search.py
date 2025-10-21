@@ -115,13 +115,14 @@ def semantic_search(query: str, size: int = 12) -> List[Dict[str, Any]]:
                     'text': chunk_source.get('text')
                 }
 
-        evidence_store.add(doc_id, score, source)
+        formatted_result = {
+            "score": score,
+            "document": {
+                "_source": source
+            }
+        }
 
-        results.append({
-            '_id': doc_id,
-            '_score': score,
-            '_source': source
-        })
+        results.append(formatted_result)
 
     end_time = time.time()
     logger.info(f"Semantic search completed in {end_time - start_time:.2f} seconds")
