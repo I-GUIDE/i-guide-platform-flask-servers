@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir \
     requests
     
 # Expose Flask port
-EXPOSE 8080
+EXPOSE 5000
     
 # Start server
 CMD ["python", "dense_embedding_server.py"]
