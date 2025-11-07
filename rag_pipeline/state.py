@@ -78,6 +78,10 @@ def ensure_state_shapes(state: MutableMapping[str, Any]) -> AgentState:
     answer.setdefault("citations", [])
     answer.setdefault("confidence_score", None)
 
+    for key in ("planner_reasoning", "safety_checks", "trace_observability"):
+        if key not in state or not isinstance(state[key], dict):
+            state[key] = {}
+
     return state  # type: ignore[return-value]
 
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Callable, Optional
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +14,7 @@ _llm_callable: Optional[Callable[[str], str]] = None
 def register_llm_callable(func: Callable[[str], str]) -> None:
     """
     Allow applications to register a synchronous LLM callable.
+    This is kept for backward compatibility with tests.
     """
     global _llm_callable
     _llm_callable = func
@@ -18,21 +22,78 @@ def register_llm_callable(func: Callable[[str], str]) -> None:
 
 def call_llm(prompt: str) -> str:
     """
-    Thin wrapper. In tests, monkeypatch to return deterministic text.
-    In production, register an LLM callable via `register_llm_callable`.
-    Must never raise.
+    Send a prompt to AnvilGPT and return the model's text response.
+    
+    Uses environment variables:
+    - ANVILGPT_URL: The API endpoint (e.g., https://anvilgpt.rcac.purdue.edu/api/chat/completions)
+    - ANVILGPT_KEY: The API key (Bearer token)
+    - ANVILGPT_MODEL: The model name (default: gpt-oss:120b)
+    
+    Returns the generated text response from the model.
+    Raises RuntimeError on configuration or API errors.
     """
+    # Allow test override via register_llm_callable
+    if _llm_callable is not None:
+        try:
+            result = _llm_callable(prompt)
+            if isinstance(result, str):
+                return result
+            logger.warning("LLM callable returned non-string result; coercing to string.")
+            return str(result)
+        except Exception as exc:
+            logger.error("LLM call failed: %s", exc)
+            return "I could not compose an answer due to a generation error."
+    
+    # Production path: direct AnvilGPT call
+    url = os.getenv("ANVILGPT_URL")
+    key = os.getenv("ANVILGPT_KEY")
+    
+    if not url or not key:
+        raise RuntimeError(
+            "❌ Missing ANVILGPT_URL or ANVILGPT_KEY environment variable. "
+            "Please set these in your .env.local file."
+        )
+    
+    model = os.getenv("ANVILGPT_MODEL", "gpt-oss:120b")
+    
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+    
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False
+    }
+    
     try:
-        if _llm_callable is None:
-            return "LLM backend not configured."
-        result = _llm_callable(prompt)
-        if isinstance(result, str):
-            return result
-        logger.warning("LLM callable returned non-string result; coercing to string.")
-        return str(result)
-    except Exception as exc:  # pragma: no cover - defensive fail-safe
-        logger.error("LLM call failed: %s", exc)
-        return "I could not compose an answer due to a generation error."
+        logger.debug(f"Calling AnvilGPT at {url} with model {model}")
+        response = requests.post(url, headers=headers, json=body, timeout=60)
+        
+        if response.status_code == 403:
+            raise RuntimeError("🚫 403 Forbidden: Invalid or expired AnvilGPT key or endpoint.")
+        
+        if response.status_code == 401:
+            raise RuntimeError("🚫 401 Unauthorized: Invalid AnvilGPT API key.")
+        
+        if response.status_code != 200:
+            error_text = response.text[:200]
+            raise RuntimeError(f"⚠️ HTTP {response.status_code}: {error_text}")
+        
+        data = response.json()
+        
+        # Extract the response content
+        if "choices" in data and len(data["choices"]) > 0:
+            content = data["choices"][0]["message"]["content"]
+            logger.debug(f"AnvilGPT response received: {len(content)} characters")
+            return content
+        else:
+            raise RuntimeError(f"⚠️ Unexpected response format from AnvilGPT: {data}")
+    
+    except requests.RequestException as exc:
+        logger.error(f"LLM request failed: {exc}")
+        raise RuntimeError(f"🔌 LLM request failed: {exc}")
 
 
 __all__ = ["call_llm", "register_llm_callable"]
