@@ -8,6 +8,7 @@ nbformat
 neo4j
 openai
 opensearch-py
+pytest
 python-dotenv
 rasterio
 requests
