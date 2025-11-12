@@ -1,7 +1,38 @@
 from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Any, Tuple
+from pathlib import Path
 import json, re, time, os, requests
 from requests.adapters import HTTPAdapter, Retry
+
+try:
+    from dotenv import load_dotenv  # type: ignore
+except ImportError:
+    load_dotenv = None  # type: ignore
+
+if load_dotenv:
+    env_candidates = [
+        Path(__file__).resolve().with_name(".env"),
+        Path(__file__).resolve().parents[1] / ".env",
+    ]
+    loaded = False
+    for env_path in env_candidates:
+        if env_path.exists():
+            load_dotenv(env_path)
+            loaded = True
+            break
+    if not loaded:
+        load_dotenv()
+
+_API_BASE_ENV_VARS = ("OPENAI_API_BASE", "ANVILGPT_URL", "API_BASE")
+_API_KEY_ENV_VARS = ("OPENAI_API_KEY", "OPENAI_KEY", "ANVILGPT_KEY", "API_KEY")
+
+
+def _get_env_value(names: Tuple[str, ...]) -> Optional[str]:
+    for name in names:
+        val = os.getenv(name)
+        if val:
+            return val
+    return None
 
 @dataclass
 class GeoAsset:
@@ -306,14 +337,16 @@ def _valid_bbox(b: Optional[List[float]]) -> Optional[Tuple[float,float,float,fl
     return (x1,y1,x2,y2)
 
 def get_q_bbox_timer_openai(user_query: str, *,
-    current_date: str, api_base: str, api_key: str, model: str,
+    current_date: str, api_base: Optional[str] = None, api_key: Optional[str] = None, model: str,
     timeout: int = 20,
     default_bbox: Optional[Tuple[float,float,float,float]] = None,
     default_timer: Optional[Tuple[Optional[str],Optional[str]]] = None,
     max_retries: int = 2
 ) -> Tuple[str, Optional[Tuple[float,float,float,float]], Optional[Tuple[Optional[str],Optional[str]]]]:
-    api_key = api_key or os.getenv("OPENAI_API_KEY")
+    api_key = api_key or _get_env_value(_API_KEY_ENV_VARS)
     if not api_key: raise NLQueryError("Missing API key.")
+    api_base = api_base or _get_env_value(_API_BASE_ENV_VARS)
+    if not api_base: raise NLQueryError("Missing API base.")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     system_prompt = f"""
 You are a geospatial query normalizer.
@@ -373,8 +406,8 @@ def run_opengeodata(*,
             q, bb, tt = get_q_bbox_timer_openai(
                 nl["user_query"],
                 current_date=nl["current_date"],
-                api_base=nl["api_base"],
-                api_key=nl["api_key"],
+                api_base=nl.get("api_base"),
+                api_key=nl.get("api_key"),
                 model=nl["model"],
                 default_bbox=tuple(nl.get("default_bbox")) if nl.get("default_bbox") else None,
                 default_timer=tuple(nl.get("default_timer")) if nl.get("default_timer") else None
