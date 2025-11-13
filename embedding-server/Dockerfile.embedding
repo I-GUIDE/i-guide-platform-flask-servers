@@ -1,0 +1,28 @@
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+    
+# Clone repository
+WORKDIR /opt
+RUN git clone https://github.com/I-GUIDE/i-guide-platform-flask-servers.git
+    
+# Set working directory
+WORKDIR /opt/i-guide-platform-flask-servers/embedding-server
+    
+# Install Python dependencies
+# Extracted these dependencies using command 
+# grep -R "import " embedding-server | head -n 20
+RUN pip install --no-cache-dir \
+    flask \
+    torch \
+    transformers \
+    opensearch-py \
+    shapely \
+    python-dotenv \
+    requests
+    
+# Expose Flask port
+EXPOSE 5000
+    
+# Start server
+CMD ["python", "dense_embedding_server.py"]
+    
