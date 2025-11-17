@@ -28,7 +28,7 @@ def main():
     # ============================================================================
     # STEP 1: INPUT QUERY
     # ============================================================================
-    query = sys.argv[1] if len(sys.argv) > 1 else "What are the main sources of greenhouse gas emissions?"
+    query = sys.argv[1] if len(sys.argv) > 1 else "Expalin about the Economic Impact of Wildfire focus in Texas"
     
     print(f"\n📝 INPUT QUERY:")
     print(f"   {query}")
@@ -209,6 +209,7 @@ def main():
     
     try:
         from rag_pipeline.state import merge_retrieval
+        from rag_pipeline.reranker_llm import rerank_evidence_with_llm
         
         print(f"\nExecuting {len(plan.chosen_modules)} search modules...")
         router_output = router.execute(plan, ctx={"state": state})
@@ -226,18 +227,23 @@ def main():
                 appended = merge_retrieval(state, source=module_name, hits=items, limit=state["params"]["top_k"])
                 print(f"    → {len(appended)} new documents added to evidence")
         
+        def _print_evidence(label, docs):
+            print(f"\n{label} ({len(docs)} docs)")
+            for i, doc in enumerate(docs, 1):
+                doc_data = doc.get("document", {})
+                doc_id = doc_data.get("doc_id", "unknown")
+                title = doc_data.get("title", "No title")[:80]
+                source = doc.get("source", "unknown")
+                print(f"  [{i:02d}] {doc_id} (from {source})")
+                print(f"        {title}...")
+        
         total_docs = len(state["evidence"]["retrieved_documents"])
         print(f"\n📊 Total unique documents: {total_docs}")
         
         if total_docs > 0:
-            print(f"\nAll retrieved documents:")
-            for i, doc in enumerate(state["evidence"]["retrieved_documents"], 1):
-                doc_data = doc.get("document", {})
-                doc_id = doc_data.get("doc_id", "unknown")
-                title = doc_data.get("title", "No title")[:60]
-                source = doc.get("source", "unknown")
-                print(f"  [{i}] {doc_id} (from {source})")
-                print(f"      {title}...")
+            _print_evidence("Evidence BEFORE LLM reranker", state["evidence"]["retrieved_documents"])
+        else:
+            print("\n⚠️  No evidence retrieved.")
         
     except Exception as e:
         print(f"\n✗ Search execution failed: {e}")
@@ -246,12 +252,27 @@ def main():
         return
     
     # ============================================================================
+    # STEP 5: LLM RERANKING
+    # ============================================================================
+    print(f"\n{'─' * 100}")
+    print(" STEP 5: Rerank Evidence with LLM")
+    print(f"{'─' * 100}")
+
+    if total_docs > 0:
+        rerank_limit = state["params"].get("top_k")
+        rerank_evidence_with_llm(state, top_k=rerank_limit)
+        _print_evidence("Evidence AFTER LLM reranker", state["evidence"]["retrieved_documents"])
+    else:
+        print("Skipping reranker: no documents to reorder.")
+    
+    # ============================================================================
     # STEP 6: GENERATE ANSWER
     # ============================================================================
     print(f"\n{'─' * 100}")
-    print(" STEP 5: Generate Answer (AnvilGPT)")
+    print(" STEP 6: Generate Answer (AnvilGPT)")
     print(f"{'─' * 100}")
     
+    hallucination_report = None
     if total_docs == 0:
         print(f"\n⚠️  No documents retrieved. Skipping generation.")
         state["answer"] = {
@@ -278,7 +299,38 @@ def main():
             }
     
     # ============================================================================
-    # STEP 7: DISPLAY FINAL ANSWER
+    # STEP 7: HALLUCINATION CHECK
+    # ============================================================================
+    print(f"\n{'─' * 100}")
+    print(" STEP 7: Hallucination Check")
+    print(f"{'─' * 100}")
+    
+    if total_docs == 0:
+        print("Skipping hallucination check: no evidence/answer available.")
+    else:
+        try:
+            from rag_pipeline.hallucination_check import evaluate_hallucination
+            
+            hallucination_report = evaluate_hallucination(state, evidence_limit=5)
+            if hallucination_report:
+                print(f"Detected: {hallucination_report.get('hallucination_detected')}")
+                print(f"Severity: {hallucination_report.get('severity')}")
+                print(f"Summary: {hallucination_report.get('summary')}")
+                issues = hallucination_report.get("issues") or []
+                if issues:
+                    print("\nIssues:")
+                    for idx, issue in enumerate(issues, 1):
+                        print(f"  {idx}. Claim: {issue.get('claim', '')}")
+                        print(f"     Reason: {issue.get('reason', '')}")
+                else:
+                    print("No specific issues flagged.")
+        except Exception as e:
+            print(f"\n✗ Hallucination check failed: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # ============================================================================
+    # STEP 8: DISPLAY FINAL ANSWER
     # ============================================================================
     print(f"\n{'=' * 100}")
     print(" FINAL OUTPUT ")
@@ -301,8 +353,13 @@ def main():
     
     print(f"\n📊 CONFIDENCE: {confidence:.2f}")
     
+    if hallucination_report:
+        print(f"\n🧪 HALLUCINATION CHECK SUMMARY:")
+        print(f"   Detected: {hallucination_report.get('hallucination_detected')}")
+        print(f"   Severity: {hallucination_report.get('severity')}")
+        print(f"   Summary: {hallucination_report.get('summary')}")
+    
     print(f"\n{'=' * 100}\n")
 
 if __name__ == "__main__":
     main()
-
