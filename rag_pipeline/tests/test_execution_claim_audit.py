@@ -141,3 +141,64 @@ def test_a_real_run_reaches_the_prompt_as_support():
     rendered = _format_execution_context(ctx)
     assert "returned successfully" in rendered, rendered[:400]
     assert "NO code was executed" not in rendered
+
+
+# --- the CLI code peers -------------------------------------------------------------------
+# Found by running the deployed stack, not by reading the diff: map-ui sends a per-request
+# `codePeer`, so a deployment whose env says AGENT_CODE_PEER=langchain still runs the claude
+# peer. Both CLI peers return from code_node BEFORE _apply_execution_honesty, so nothing else
+# sets `executed` — and rule (0) would then refuse to release a finding about a run that
+# really happened, which is strictly worse than the amnesty it used to get.
+
+def _cli_result(backend, ok):
+    import importlib
+
+    mod = importlib.import_module(f"agent_runtime.{backend}_peer")
+    fn = getattr(mod, f"run_{backend}_code_peer")
+    return mod, fn
+
+
+def test_a_successful_cli_run_reports_executed():
+    for backend, runner in (("claude", "run_claude"), ("opencode", "run_opencode")):
+        mod, fn = _cli_result(backend, True)
+        real = getattr(mod, runner)
+        try:
+            setattr(mod, runner, lambda *a, **k: {"ok": True, "answer": "done", "exit_code": 0})
+            out = fn("q", evidence=[], state={})
+        finally:
+            setattr(mod, runner, real)
+        assert out["executed"] is True, backend
+        assert "execution_error" not in out, backend
+        assert g._code_ran_this_turn({"code_result": out}) is True, backend
+
+
+def test_a_failed_cli_run_reports_the_failure():
+    for backend, runner in (("claude", "run_claude"), ("opencode", "run_opencode")):
+        mod, fn = _cli_result(backend, False)
+        real = getattr(mod, runner)
+        try:
+            setattr(mod, runner,
+                    lambda *a, **k: {"ok": False, "answer": "", "exit_code": 2, "error": "boom"})
+            out = fn("q", evidence=[], state={})
+        finally:
+            setattr(mod, runner, real)
+        assert out["executed"] is False, backend
+        assert "boom" in out["execution_error"], backend
+        assert g._execution_environment_lines({"code_result": out}) == \
+            [g._EXECUTION_FAILED_THIS_TURN], backend
+
+
+def test_a_genuine_cli_run_releases_the_provenance_finding():
+    """The regression the CLI gap would have caused: code really ran, so the finding goes."""
+    mod, fn = _cli_result("claude", True)
+    real = mod.run_claude
+    try:
+        mod.run_claude = lambda *a, **k: {"ok": True, "answer": "counted them", "exit_code": 0}
+        out = fn("q", evidence=[], state={})
+    finally:
+        mod.run_claude = real
+    audit = {"issues": [{"claim": "the code I ran returned 490249 rows", "reason": "unsupported"}],
+             "hallucination_detected": True, "severity": "high"}
+    got = g._reconcile_audit_with_artifacts(audit, [], execution_context={"code_result": out},
+                                            prior_rows=[])
+    assert got["issues"] == [], "a real CLI run must release the execution claim"

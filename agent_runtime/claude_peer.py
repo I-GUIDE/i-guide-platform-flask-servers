@@ -764,8 +764,20 @@ def run_claude_code_peer(
         answer = "\n\n".join(
             x for x in (f"Claude Code peer failed: {failure}", detail, answer) if x
         )
+    # The CLI peers return BEFORE _apply_execution_honesty, so nothing else ever sets
+    # `executed` for them. Left absent, the auditor's execution-provenance rule reads this
+    # turn as "no code ran" and refuses to release a provenance finding about a run that
+    # really happened. `ok` is the honest signal available here: the sandboxed agentic CLI
+    # whose whole job is running code completed successfully. It is weaker than the built-in
+    # peer's execute_code `ok` — the CLI could in principle answer without running anything —
+    # but it errs toward "something ran", which is the direction that cannot regress: it
+    # restores exactly the amnesty the claim would have received before that rule existed.
     return {
         "answer": answer,
+        "executed": bool(result.get("ok")),
+        **({} if result.get("ok") else
+           {"execution_error": str(result.get("error")
+                                   or f"claude exited with code {result.get('exit_code')}")}),
         "tool_calls": [{"name": "claude_run", "args": call_args}],
         "tool_results": [{"name": "claude_run", "content": result}],
     }

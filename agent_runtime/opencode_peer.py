@@ -457,8 +457,15 @@ def run_opencode_code_peer(
         answer = "\n\n".join(
             x for x in (f"opencode code peer failed: {failure}", detail, answer) if x
         )
+    # See the same block in claude_peer.run_claude_code_peer: the CLI peers bypass
+    # _apply_execution_honesty, so without this the execution-provenance audit rule treats a
+    # real sandboxed run as "nothing ran".
     return {
         "answer": answer,
+        "executed": bool(result.get("ok")),
+        **({} if result.get("ok") else
+           {"execution_error": str(result.get("error")
+                                   or f"opencode exited with code {result.get('exit_code')}")}),
         "tool_calls": [{"name": "opencode_run", "args": call_args}],
         "tool_results": [{"name": "opencode_run", "content": result}],
     }

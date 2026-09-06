@@ -321,16 +321,35 @@ def test_run_timeout_kills_the_container(monkeypatch, tmp_path):
 
 def test_peer_result_shape_on_failure(monkeypatch):
     """Same flat shape as the LangChain peer and the opencode peer, so synthesis
-    and the trace pipeline stay agnostic to the backend."""
+    and the trace pipeline stay agnostic to the backend.
+
+    `executed`/`execution_error` are part of that shape, not an addition to it: the LangChain
+    peer has always set them (_apply_execution_honesty), and the CLI peers return before that
+    runs. Pinning the key set WITHOUT them is what let the two shapes drift — the grounding
+    auditor read a real sandboxed run as "no code executed" and caveated a correct answer."""
     monkeypatch.setattr(ccp, "run_claude", lambda prompt, **kw: {
         "ok": False, "exit_code": 1, "answer": "", "stderr": "boom",
         "error": "claude exploded", "artifacts": [], "backend": "claude-docker",
         "model": "sonnet",
     })
     out = ccp.run_claude_code_peer("do a thing")
-    assert set(out) == {"answer", "tool_calls", "tool_results"}
+    assert set(out) == {"answer", "executed", "execution_error", "tool_calls", "tool_results"}
+    assert out["executed"] is False
+    assert "claude exploded" in out["execution_error"]
     assert out["tool_calls"][0]["name"] == "claude_run"
     assert "claude exploded" in out["answer"] and "boom" in out["answer"]
+
+
+def test_peer_result_shape_on_success(monkeypatch):
+    """The success half the suite never had: a failure-only shape test cannot catch a peer
+    that reports nothing when the run WORKED, which is the direction that misleads the audit."""
+    monkeypatch.setattr(ccp, "run_claude", lambda prompt, **kw: {
+        "ok": True, "exit_code": 0, "answer": "counted them", "artifacts": [],
+        "backend": "claude-docker", "model": "sonnet",
+    })
+    out = ccp.run_claude_code_peer("do a thing")
+    assert set(out) == {"answer", "executed", "tool_calls", "tool_results"}
+    assert out["executed"] is True
 
 
 def test_supervisor_code_fn_dispatches_to_claude(monkeypatch):
