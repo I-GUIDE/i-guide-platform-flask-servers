@@ -528,7 +528,9 @@ def _format_execution_context(execution_context: Any, *, max_chars: int = 2200) 
             rendered_env = ("\n".join(str(p) for p in env) if isinstance(env, (list, tuple))
                             else str(env))
             parts.append("facts about the environment this answer was produced in (first-class "
-                         "grounding: quote these spans when the answer describes them):\n"
+                         "grounding, in BOTH directions: quote a span here to support a claim "
+                         "the answer makes about the environment, and quote one to mark a claim "
+                         "CONTRADICTED when it asserts the opposite of what the span says):\n"
                          + rendered_env[:max_chars])
         prior = execution_context.get("prior_actions")
         if prior:

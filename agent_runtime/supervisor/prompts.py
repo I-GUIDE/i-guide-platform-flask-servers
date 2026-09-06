@@ -70,7 +70,14 @@ SYNTHESIS_PROMPT = (
     "information is unavailable. Do not present it as work done this turn, do not embed an image "
     "or link that appears only there, and if a record contradicts this turn's results, this turn "
     "wins. A line marked FAILED means the tool did not work — that result does not exist and must "
-    "never be reported as produced."
+    "never be reported as produced.\n"
+    "9. CODE PROVENANCE: showing code is fine; saying it RAN is a factual claim, and this prompt "
+    "previously said nothing about the difference. The analysis/code results carry `executed`, "
+    "true only when execute_code actually ran and SUCCEEDED this turn. When it is false or "
+    "absent, do not write \"the code I ran\", \"here is the code run\" or \"actual stdout\", and do "
+    "not attribute any figure to running it — either present the code plainly as not run, or "
+    "leave it out. Figures that came from a TOOL are still yours to report: report them as the "
+    "tool's, and do not credit them to code that never executed."
 )
 
 # The two DISTINCT visualization outcomes. Geographic data belongs on the user's live map

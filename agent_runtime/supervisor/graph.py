@@ -861,11 +861,56 @@ def _visible_state_lines(rows: List[Dict[str, Any]]) -> List[str]:
 # the issue deterministically. The audit prompt's own history in evidence_quality.py records
 # four prose formulations that were measured and did not hold, so prose alone is not the
 # guarantee — it just stops the auditor from being asked an unanswerable question.
+# Stated plainly to the AUDITOR because the judgement turns on it. `executed` already exists on
+# both peers' results, but only inside the serialized blob that the synthesis/audit slice can
+# cut — and the auditor cannot tell "code that ran" from "code that was merely shown" without it.
+_NO_EXECUTION_THIS_TURN = (
+    "- NO code was executed this turn: there is no successful execute_code record. Any code the "
+    "answer displays is UNRUN, and any figure the answer attributes to running it — stdout, a "
+    "computed total, 'the code I ran' — is unsupported, even when the figure itself appears in "
+    "the record because some OTHER tool produced it."
+)
+_EXECUTION_FAILED_THIS_TURN = (
+    "- execute_code RAN AND FAILED this turn. The answer may say the code was run, but must not "
+    "present its output as results."
+)
+_EXECUTION_RAN_THIS_TURN = (
+    "- code was executed this turn with execute_code and returned successfully, so an answer "
+    "describing it as run is supported by the record."
+)
+
+
 _MAP_CLIENT_AFFORDANCES = (
     "- the map these layers are on is a live client the user drives directly: they pan and zoom "
     "it, show/hide or remove any layer from the layers panel, and click a vector feature to see "
     "its attributes. This is a fact about the environment, not a claim needing evidence."
 )
+
+
+def _code_ran_this_turn(execution_context: Optional[Dict[str, Any]]) -> bool:
+    """Whether any peer reports a SUCCESSFUL execute_code run this turn.
+
+    Reads the peers' own `executed`, which is derived from the sandbox payload's ``ok`` rather
+    than from the tool having been called.
+    """
+    ctx = execution_context or {}
+    for key in ("analysis_results", "code_result"):
+        part = ctx.get(key)
+        if isinstance(part, dict) and part.get("executed") is True:
+            return True
+    return False
+
+
+def _execution_environment_lines(execution_context: Optional[Dict[str, Any]]) -> List[str]:
+    """The execution-provenance fact for the auditor's record."""
+    if _code_ran_this_turn(execution_context):
+        return [_EXECUTION_RAN_THIS_TURN]
+    ctx = execution_context or {}
+    for key in ("analysis_results", "code_result"):
+        part = ctx.get(key)
+        if isinstance(part, dict) and part.get("execution_error"):
+            return [_EXECUTION_FAILED_THIS_TURN]
+    return [_NO_EXECUTION_THIS_TURN]
 
 
 def _map_environment_lines(delivered: bool) -> List[str]:
@@ -1401,6 +1446,25 @@ _MAP_AFFORDANCE_RE = re.compile(
 )
 
 
+# CODE SHOWN is legitimate and common — quoting a knowledge-base block, illustrating an
+# approach, reporting a tool's own source. What requires an execution record is the claim that it
+# RAN, or that a figure came out of running it.
+_EXECUTION_CLAIM_RE = re.compile(
+    r"\bthe\s+code\s+(?:that\s+was\s+|i\s+|we\s+)?(?:actually\s+)?ran\b"
+    r"|\bhere\s+is\s+the\s+code\s+(?:that\s+was\s+)?run\b"
+    r"|\b(?:code|script|snippet|program)\b[^.?!\n]{0,60}\b(?:was|were)\s+(?:run|executed)\b"
+    r"|\b(?:i|we)\s+(?:ran|executed)\b[^.?!\n]{0,40}\b(?:code|script|snippet|query|it)\b"
+    r"|\b(?:actual|real)\s+(?:stdout|output)\b"
+    r"|\bstdout\s+from\s+the\s+run\b"
+    r"|\bout(?:put)?\s+(?:of|from)\s+(?:the\s+)?(?:run|execution|script)\b",
+    re.I)
+
+
+def _is_execution_claim(claim: str) -> bool:
+    """A claim that code WAS RUN, not merely shown."""
+    return bool(_EXECUTION_CLAIM_RE.search(str(claim or "")))
+
+
 def _is_map_claim(claim: str) -> bool:
     """A claim about the user's map: that a layer is on it, or what they can do with it there.
 
@@ -1517,6 +1581,7 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
             blob = str(execution_context)
         blob = blob.replace(",", "")
     map_delivered = _map_layer_was_delivered(execution_context, prior_rows)
+    code_ran = _code_ran_this_turn(execution_context)
     kept = []
     for it in issues:
         if isinstance(it, dict):
@@ -1526,6 +1591,16 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
             # Tolerate a malformed issue (e.g. a bare string) from a strict small judge that
             # ignored the {claim, reason} schema — never crash synthesize over audit shape.
             claim, reason = str(it or "").lower(), ""
+        # (0) EXECUTION PROVENANCE, decided before the other amnesties can reach it. The
+        # figures in such a claim are usually real — another tool produced them — so rule (2)
+        # would drop the issue on the strength of the very numbers whose provenance is in
+        # dispute. Observed live: a turn answered from an MCP tool and narrated requests/pandas
+        # code it never ran, with every figure present in the record.
+        if _is_execution_claim(claim):
+            if code_ran:
+                continue          # something really did run this turn
+            kept.append(it)
+            continue              # nothing ran: the provenance dispute stands
         if artifacts and any(m in claim for m in _ARTIFACT_CLAIM_MARKERS):
             continue  # (1) artifact dispute, but an artifact was produced
         if map_delivered and _is_map_claim(claim):
@@ -4076,8 +4151,9 @@ def build_supervisor_graph(
             # under that heading would read as a stale artifact of some previous turn. The
             # answerer's note deliberately does NOT get this line — SYNTHESIS_PROMPT already
             # covers the map, and the gap being closed here is the auditor's alone.
-            _map_env = _map_environment_lines(_map_layer_was_delivered(
-                {"analysis_results": ar, "code_result": cr, "artifacts": artifacts}, _rows))
+            _env_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts}
+            _map_env = (_map_environment_lines(_map_layer_was_delivered(_env_ctx, _rows))
+                        + _execution_environment_lines(_env_ctx))
             _note = _prior_actions_note(_rows)
             answer = do_synthesize(q, evidence, ar, cr, _history, _note)
             # The auditor must be given the SAME earlier-turn tool records the answerer was
