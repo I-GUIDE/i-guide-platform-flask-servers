@@ -20,6 +20,7 @@ untrusted.
 
 from __future__ import annotations
 
+import filecmp
 import hashlib
 import json
 import logging
@@ -472,7 +473,10 @@ def _persist_source(code: str, *, label: Optional[str] = None,
 
 
 def _stage_inputs(work: Path,
-                  input_files: Optional[List[Dict[str, str]]]
+                  input_files: Optional[List[Dict[str, str]]],
+                  *,
+                  keep_modified: bool = False,
+                  kept: Optional[List[str]] = None,
                   ) -> Tuple[List[str], List[Dict[str, str]], List[str]]:
     """Copy requested input files into *work* so the sandboxed code can read them.
 
@@ -483,6 +487,19 @@ def _stage_inputs(work: Path,
 
     Returns ``(staged_dest_names, errors, shadowed)`` — ``shadowed`` being names where an
     upload landed on top of a file the conversation's workspace already had.
+
+    ``keep_modified`` is for a work dir that PERSISTS between turns (the claude peer's session
+    directory). There, re-copying the pristine upload over the peer's own in-place edit on every
+    turn is the equivalent of a checkout before every command: the peer never sees its own work,
+    so a multi-turn task restarts from the original each turn, and because the clobber resets the
+    baseline the same edit is re-delivered as a NEW artifact every turn (measured: three distinct
+    file ids over three turns). With it set, an existing dest is never overwritten; names whose
+    on-disk bytes DIFFER from the upload are reported through ``kept`` so the caller can tell the
+    model its edit was preserved and the attachment was not re-applied. The original stays
+    reachable under its file_id, which is staged fresh whenever it is not already there.
+
+    Off by default: ``execute_code`` deliberately lets the upload win over a workspace file of
+    the same name and says so in ``shadowed``, and that contract is pinned by its own tests.
     """
     staged: List[str] = []
     errors: List[Dict[str, str]] = []
@@ -505,6 +522,16 @@ def _stage_inputs(work: Path,
             errors.append({"source": source, "error": "source file not found"})
             continue
         try:
+            if keep_modified and target.is_file():
+                # Never overwrite what is already here. Same bytes: skip the copy rather than
+                # do a no-op that bumps mtime, which would make an untouched upload read as
+                # modified and be re-delivered. Different bytes: it is the peer's own edit from
+                # an earlier turn, so it stands, and the caller is told through `kept`.
+                if not filecmp.cmp(str(src), str(target), shallow=False):
+                    if kept is not None:
+                        kept.append(dest)
+                staged.append(dest)
+                continue
             # Uploads are staged AFTER the workspace is carried in, so an upload whose
             # filename matches a file the model wrote wins silently — it reads its own
             # edited file and gets the original upload. Staging still wins (the user's data

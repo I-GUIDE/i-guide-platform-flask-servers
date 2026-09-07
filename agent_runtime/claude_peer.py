@@ -241,6 +241,27 @@ def _throwaway(root: Path) -> Dict[str, Any]:
             "persistent": False, "resumed": False}
 
 
+def _kept_files_note(kept: List[str], file_ids: List[str]) -> str:
+    """Tell the peer that its own edit is what is on disk, not the attachment.
+
+    This directory persists across turns, so a file the peer edited earlier is still here. The
+    attachment is NOT re-copied over it — otherwise a multi-turn task would restart from the
+    original every turn. The peer has to know which it is looking at, and that the pristine
+    original is still reachable, or a request to "start over from the original file" is
+    unanswerable.
+    """
+    lines = [
+        "Files you edited on an earlier turn of this conversation are still here as you left "
+        f"them, and were NOT overwritten by the attached upload: {', '.join(sorted(kept))}. "
+        "Continue from them.",
+    ]
+    if file_ids:
+        lines.append("The unmodified original of each attachment is also in this directory "
+                     f"under its file id ({', '.join(sorted(file_ids))}), so you can start over "
+                     "from it if the task asks for that.")
+    return " ".join(lines)
+
+
 def session_dir(thread_id: Optional[str]) -> Dict[str, Any]:
     """The directory this run works in: the conversation's own, or a throwaway.
 
@@ -625,6 +646,14 @@ def run_claude(
     try:
         staging = _stage_conversation_files(work, input_file_ids)
         renamed = neutralize_instruction_files(work, staging["staged"])
+        # The staging outcome is only known HERE, after the prompt was built by the caller, so
+        # the note is appended to the prompt rather than assembled in _build_peer_prompt. Without
+        # it the peer reads its own earlier edit believing it is the user's attachment.
+        _kept = [str(n) for n in (staging.get("kept") or [])]
+        if _kept:
+            _ids = [str(i.get("file_id")) for i in (staging.get("staged_info") or [])
+                    if i.get("file_id") and (i.get("filename") in _kept)]
+            prompt = "\n\n".join([prompt, _kept_files_note(_kept, _ids)])
         # Baseline for the uploads, taken AFTER the rename so it covers the on-disk names.
         # `already_persisted` below is signature-checked for exactly this reason -- "a file it
         # edited SHOULD be sent again" -- but the staged half of the same expression was not,

@@ -281,11 +281,17 @@ def _stage_conversation_files(work: Path, input_file_ids: Optional[List[str]]) -
     """Copy conversation-attached files into *work* (same policy/caps as execute_code)."""
     refs = [str(x).strip() for x in (input_file_ids or []) if str(x).strip()]
     if not refs:
-        return {"staged": [], "staged_info": [], "errors": [], "skipped": [], "aliases": {}}
+        return {"staged": [], "staged_info": [], "errors": [], "skipped": [], "aliases": {},
+                "kept": []}
     from agent_runtime.langchain_exec_tools import _build_staging
 
     staging, staged_info, errors, skipped = _build_staging(refs)
-    staged, stage_errors, _shadowed = _stage_inputs(work, staging)
+    # keep_modified: the claude peer's work dir persists between turns, so an existing file of
+    # this name is the peer's own edit and must not be re-clobbered by the pristine upload.
+    # Harmless for opencode, whose work dir is a fresh mkdtemp every run — nothing pre-exists.
+    kept: List[str] = []
+    staged, stage_errors, _shadowed = _stage_inputs(work, staging,
+                                                    keep_modified=True, kept=kept)
     return {
         "staged": staged,
         "staged_info": staged_info,
@@ -294,6 +300,10 @@ def _stage_conversation_files(work: Path, input_file_ids: Optional[List[str]]) -
         # {file_id name -> the filename it stands for}; see _resolve_staged_aliases. Additive,
         # so a caller that does not know about it is unaffected.
         "aliases": _staged_aliases(staging),
+        # Names whose on-disk copy was kept because it differs from the upload -- the peer's own
+        # edit from an earlier turn. The caller must tell the model, or it silently believes it
+        # is looking at the attachment.
+        "kept": kept,
     }
 
 
