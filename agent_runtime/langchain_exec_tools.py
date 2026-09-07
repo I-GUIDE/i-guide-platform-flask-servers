@@ -120,7 +120,18 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
             names = [_free_dest(filename, claimed)]
         for dest in names:
             claimed[dest] = str(ref)
-            staging.append({"source": src, "dest": dest})
+            spec = {"source": src, "dest": dest}
+            # The file_id copy is an ADDRESSING alias for the same bytes, not a second file.
+            # Say so, so a run that writes THROUGH it does not deliver the user's own upload
+            # back as an extension-less blob named after its store id -- which is also
+            # unrecognisable to the geodata sniffing in layer_qa / map_layers, so a GeoJSON
+            # written back that way ships as an unusable download instead of a map layer.
+            # Only when the human filename is genuinely staged too: if it lost the name to
+            # another input, the file_id is this file's ONLY name and is not an alias at all.
+            if (file_id and filename and file_id != filename
+                    and dest == file_id and filename in names):
+                spec["alias_of"] = filename
+            staging.append(spec)
         # `available_as` is what the model is told to open, so it must be the names this file
         # ACTUALLY has — not the ones it would have had if nothing else were staged.
         staged_info.append({"ref": str(ref), "file_id": file_id, "filename": filename,

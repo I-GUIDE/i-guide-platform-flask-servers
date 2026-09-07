@@ -78,7 +78,13 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent_runtime.code_execution import _clip, _host_user, _sig_map, _work_root
+from agent_runtime.code_execution import (
+    _clip,
+    _host_user,
+    _resolve_staged_aliases,
+    _sig_map,
+    _work_root,
+)
 from agent_runtime.opencode_peer import (
     CODE_PEER_ENV,
     _build_peer_prompt,
@@ -644,9 +650,14 @@ def run_claude(
         _now = _sig_map(work, staged_sigs)
         pristine = {rel for rel, sig in staged_sigs.items()
                     if _now.get(rel) == sig}                    # read but not written
-        excluded = pristine | already_persisted(work)
+        # See _resolve_staged_aliases: an edit made through the opaque file_id name is carried
+        # to the real filename, so map_layers below can still recognise it by extension.
+        alias_names = _resolve_staged_aliases(work, staging.get("aliases") or {},
+                                              staged_sigs, pristine)
+        excluded = pristine | alias_names | already_persisted(work)
         artifacts = _persist_artifacts(work, excluded,
-                                       defer={r for r in staged_sigs if r not in pristine})
+                                       defer={r for r in staged_sigs
+                                              if r not in pristine and r not in alias_names})
         if persistent:
             record_persisted(work, [a.get("path") for a in artifacts if a.get("path")])
         # The tool path runs these checks inside add_map_layer. This peer has none of the

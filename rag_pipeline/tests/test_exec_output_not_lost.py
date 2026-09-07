@@ -146,8 +146,11 @@ def test_a_shadowed_workspace_file_rewritten_by_the_run_is_not_reverted(monkeypa
 # These assert on the EXCLUDE SET handed to _persist_artifacts, which is where the policy
 # lives -- no file store, no container.
 
-def _peer_harness(monkeypatch, tmp_path, mod, writes):
-    """Stage one upload for real, stub the container, capture the exclude set."""
+def _peer_harness(monkeypatch, tmp_path, mod, writes, alias=None):
+    """Stage one upload for real, stub the container, capture the exclude set.
+
+    `alias` stages a second copy under an opaque file_id-style name and declares it an alias,
+    the way _stage_conversation_files does for a real upload."""
     import subprocess
     import time
 
@@ -158,8 +161,12 @@ def _peer_harness(monkeypatch, tmp_path, mod, writes):
 
     def stage(work, ids):
         from agent_runtime.code_execution import _stage_inputs
-        staged, errs, _ = _stage_inputs(work, [{"source": str(upload), "dest": "data.csv"}])
-        return {"staged": staged, "staged_info": [], "errors": errs, "skipped": []}
+        specs = [{"source": str(upload), "dest": "data.csv"}]
+        if alias:
+            specs.append({"source": str(upload), "dest": alias, "alias_of": "data.csv"})
+        staged, errs, _ = _stage_inputs(work, specs)
+        return {"staged": staged, "staged_info": [], "errors": errs, "skipped": [],
+                "aliases": {alias: "data.csv"} if alias else {}}
 
     monkeypatch.setattr(mod, "_stage_conversation_files", stage)
 
@@ -178,6 +185,14 @@ def _peer_harness(monkeypatch, tmp_path, mod, writes):
         captured["exclude"] = set(exclude)
         captured["defer"] = set(defer or ())
         captured["on_disk"] = {p.name for p in work.iterdir() if p.is_file()}
+        # Read the bytes HERE: opencode_peer rmtree's the work dir in its `finally`, so the
+        # directory is gone by the time the test body runs.
+        captured["bodies"] = {}
+        for f in work.iterdir():
+            try:
+                captured["bodies"][f.name] = f.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                pass
         return []
 
     monkeypatch.setattr(mod, "_persist_artifacts", capture)
@@ -331,3 +346,120 @@ def test_hitting_the_artifact_cap_is_reported_not_silent(monkeypatch, tmp_path):
         f"a rewritten input must never displace the run's own new output; got {names}")
     assert "were NOT" in (r.stderr or ""), (
         f"the cap truncation must be named, not silent; stderr={r.stderr!r}")
+
+
+# --- the file_id twin ---------------------------------------------------------------------
+# Every upload is staged under BOTH its file_id and its original filename, and the tool
+# description tells the model both names work (test_code_execution.py notes reading "by file_id
+# (the name the model used in the failing trace)"). Once the exclusion became conditional, a run
+# that wrote THROUGH the id delivered the user's own upload back as an extension-less blob named
+# after its store id -- and the missing suffix defeats the geodata sniffing in layer_qa /
+# map_layers, so a GeoJSON written that way shipped as an unusable download instead of a map
+# layer. In a session it was worse than ugly: the opaque name became a PERMANENT workspace
+# resident, re-staged over itself so every later turn emitted a `shadowed` warning naming a file
+# the model never wrote, and occupying a row in the 25-row session_workspace_listing.
+
+def _uploaded(monkeypatch, tmp_path, name, body, session):
+    from agent_runtime.code_execution import LocalSubprocessExecutor, _session_workspace
+    from agent_runtime.file_store import create_output_file
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    _exec_env(monkeypatch, tmp_path)
+    rec = create_output_file(name, body)
+    tools = make_code_execution_tools(executor=LocalSubprocessExecutor(), session_id=session)
+    return rec["file_id"], tools[0], _session_workspace(session)
+
+
+def test_writing_through_the_file_id_delivers_the_real_filename(monkeypatch, tmp_path):
+    import json
+
+    fid, tool, ws = _uploaded(monkeypatch, tmp_path, "zones.geojson",
+                              '{"type":"FeatureCollection","features":[]}', "twin::through")
+    out = json.loads(tool.invoke({
+        "code": f"d=open('{fid}').read()\nopen('{fid}','w').write(d.replace('[]','[1]'))",
+        "input_files": [fid]}))
+    assert out["ok"] is True, out
+    names = [a["filename"] for a in out.get("artifacts") or []]
+    ws_files = sorted(p.name for p in ws.rglob("*") if p.is_file())
+
+    assert fid not in names, f"the opaque store id must never be an artifact name; got {names}"
+    assert fid not in ws_files, f"nor a durable workspace resident; got {ws_files}"
+    assert "zones.geojson" in names, (
+        f"the edit made through the alias must arrive under the real filename; got {names}")
+    assert "zones.geojson" in ws_files, ws_files
+    body = (ws / "zones.geojson").read_text()
+    assert '[1]' in body, f"and must carry the RUN's bytes, not the upload's; got {body!r}"
+
+
+def test_a_bulk_touch_does_not_make_the_twin_a_workspace_resident(monkeypatch, tmp_path):
+    """A glob loop that rewrites everything bumps the twin's mtime, so it stops being pristine.
+    It must still not reach the workspace: once there it is permanent."""
+    import json
+
+    fid, tool, ws = _uploaded(monkeypatch, tmp_path, "data.csv", "a,b\n1,2\n", "twin::glob")
+    out = json.loads(tool.invoke({
+        "code": "import glob\nfor f in sorted(glob.glob('*')):\n"
+                "    b=open(f,'rb').read()\n    open(f,'wb').write(b)",
+        "input_files": [fid]}))
+    assert out["ok"] is True, out
+    names = [a["filename"] for a in out.get("artifacts") or []]
+    ws_files = sorted(p.name for p in ws.rglob("*") if p.is_file())
+    assert fid not in names, names
+    assert fid not in ws_files, f"the opaque twin must stay out of the workspace; got {ws_files}"
+
+
+def test_the_file_id_is_still_a_working_name_to_read_by(monkeypatch, tmp_path):
+    """Aliasing must not break the addressing it exists for."""
+    import json
+
+    fid, tool, _ = _uploaded(monkeypatch, tmp_path, "data.csv", "a,b\n1,2\n", "twin::read")
+    out = json.loads(tool.invoke({"code": f"print(open('{fid}').read())", "input_files": [fid]}))
+    assert out["ok"] is True and "a,b" in out["stdout"], out
+
+
+def test_a_file_id_that_is_the_only_name_is_not_treated_as_an_alias(monkeypatch, tmp_path):
+    """If the human filename went to another input, the file_id is this file's ONLY name.
+    Excluding it as an alias would lose the file outright."""
+    from agent_runtime.langchain_exec_tools import _build_staging
+    from agent_runtime.code_execution import _staged_aliases
+    from agent_runtime.file_store import create_output_file
+
+    _exec_env(monkeypatch, tmp_path)
+    a = create_output_file("data.csv", "first\n")
+    b = create_output_file("data.csv", "second\n")       # same filename, different upload
+    staging, info, _, _ = _build_staging([a["file_id"], b["file_id"]])
+    aliases = _staged_aliases(staging)
+
+    dests = [s["dest"] for s in staging]
+    assert "data.csv" in dests
+    # whichever input lost the human name keeps its file_id as a real, non-alias name
+    for rec in (a, b):
+        if rec["file_id"] in dests and "data.csv" not in (
+                next(i["available_as"] for i in info if i["file_id"] == rec["file_id"])):
+            assert rec["file_id"] not in aliases, (
+                "a file_id that is the only staged name is not an alias")
+
+
+def test_peers_deliver_an_alias_edit_under_the_real_filename(monkeypatch, tmp_path):
+    """Both CLI peers stage uploads through the same _build_staging, so both get the twin. It
+    matters more here: layers_for_artifacts sniffs by extension, so a .geojson a peer wrote back
+    under its opaque id would never become a map layer."""
+    import agent_runtime.claude_peer as ccp
+    import agent_runtime.opencode_peer as ocp
+
+    fid = "file_0c5c29141807"
+    for mod, run, key in ((ocp, "run_opencode", "AGENT_OPENCODE_API_KEY"),
+                          (ccp, "run_claude", "ANTHROPIC_API_KEY")):
+        monkeypatch.setenv(key, "sk-test")
+        cap = _peer_harness(monkeypatch, tmp_path / mod.__name__, mod,
+                            {fid: "EDITED THROUGH THE ID\n"}, alias=fid)
+        getattr(mod, run)("do it", input_file_ids=["x"])
+        assert fid in cap["exclude"], (
+            f"{mod.__name__}: the opaque id must never be delivered as an artifact name; "
+            f"exclude={cap['exclude']}")
+        assert "data.csv" not in cap["exclude"], (
+            f"{mod.__name__}: the edit must be delivered under the real filename; "
+            f"exclude={cap['exclude']}")
+        assert cap["bodies"].get("data.csv", "").strip() == "EDITED THROUGH THE ID", (
+            f"{mod.__name__}: the alias's bytes must be carried onto the real name; "
+            f"got {cap['bodies'].get('data.csv')!r}")

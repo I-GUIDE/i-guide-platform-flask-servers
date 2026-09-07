@@ -813,6 +813,46 @@ def _sig_map(directory: Path, names: Iterable[str]) -> Dict[str, Tuple[int, int]
     return out
 
 
+def _staged_aliases(input_files: Optional[List[Dict[str, str]]]) -> Dict[str, str]:
+    """{alias dest -> the human filename it stands for}, from the staging specs."""
+    out: Dict[str, str] = {}
+    for spec in input_files or []:
+        if not isinstance(spec, dict):
+            continue
+        dest, primary = spec.get("dest"), spec.get("alias_of")
+        if dest and primary:
+            out[str(dest)] = str(primary)
+    return out
+
+
+def _resolve_staged_aliases(work: Path, aliases: Dict[str, str],
+                            staged_sigs: Dict[str, Any], pristine: set) -> set:
+    """Fold a written-through file_id twin onto the filename it aliases.
+
+    Each upload is staged under BOTH its file_id and its original filename, and the tool
+    description tells the model both names work — so a run really does sometimes write through
+    the id. That copy is the same file, not a second one: delivered under the raw id it reaches
+    the user as an extension-less blob, and the missing suffix defeats the geodata sniffing in
+    layer_qa / map_layers, so a GeoJSON written back that way is an unusable download rather
+    than a map layer. Carrying the bytes to the real name fixes both, and lets the alias be
+    excluded everywhere without losing anything.
+
+    Mutates *pristine*: a filename that receives the alias's bytes is an output now, whatever
+    it was before. Returns the alias names, for the caller's exclusion sets.
+    """
+    for alias, primary in (aliases or {}).items():
+        if alias not in staged_sigs or alias in pristine:
+            continue                       # the twin was never written through
+        if primary in staged_sigs and primary not in pristine:
+            continue                       # the run wrote the real name too; that copy wins
+        try:
+            shutil.copy2(work / alias, work / primary)
+        except OSError:
+            continue
+        pristine.discard(primary)
+    return set(aliases or ())
+
+
 def _copy_tree(src: Path, dst: Path, *, skip: Optional[set] = None) -> None:
     for p in src.rglob("*"):
         if not p.is_file():
@@ -1006,7 +1046,10 @@ class CodeExecutor:
                          if carried.get(rel) == sig}   # carried in and untouched -> not an output
             pristine = {rel for rel, sig in staged_sigs.items()
                         if after.get(rel) == sig}      # staged in and untouched -> still just an upload
-            keep_out = {"script.py", *pristine, *unchanged}
+            # The opaque file_id twin is an alias, never a deliverable name of its own.
+            alias_names = _resolve_staged_aliases(
+                work, _staged_aliases(input_files), staged_sigs, pristine)
+            keep_out = {"script.py", *pristine, *unchanged, *alias_names}
             source_artifacts = _persist_source(code, label=label) if (code or "").strip() else []
             over_cap: List[str] = []
             artifacts = [*source_artifacts,
@@ -1016,9 +1059,13 @@ class CodeExecutor:
                              dropped=over_cap)]
             if workspace:
                 # Only `pristine` is skipped, not `staged`: an upload the run never touched stays
-                # out of the durable workspace (including its file_id-named twin), while one the
-                # run rewrote is a result and belongs there.
-                _copy_tree(work, workspace, skip={"script.py", *pristine})
+                # out of the durable workspace, while one the run rewrote is a result and belongs
+                # there. `alias_names` goes too, unconditionally — a file_id-named copy that
+                # reached the workspace would be PERMANENT: carried into every later run,
+                # re-staged over itself so every subsequent turn emits a `shadowed` warning
+                # naming a file the model never wrote, and occupying a row in the 25-row
+                # session_workspace_listing that is the model's only view of what is on disk.
+                _copy_tree(work, workspace, skip={"script.py", *pristine, *alias_names})
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
             if auto:

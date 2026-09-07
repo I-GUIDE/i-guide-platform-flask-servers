@@ -46,8 +46,10 @@ from agent_runtime.code_execution import (
     MAX_ARTIFACTS,
     _clip,
     _host_user,
+    _resolve_staged_aliases,
     _sig_map,
     _stage_inputs,
+    _staged_aliases,
     _work_root,
 )
 
@@ -264,7 +266,7 @@ def _stage_conversation_files(work: Path, input_file_ids: Optional[List[str]]) -
     """Copy conversation-attached files into *work* (same policy/caps as execute_code)."""
     refs = [str(x).strip() for x in (input_file_ids or []) if str(x).strip()]
     if not refs:
-        return {"staged": [], "staged_info": [], "errors": [], "skipped": []}
+        return {"staged": [], "staged_info": [], "errors": [], "skipped": [], "aliases": {}}
     from agent_runtime.langchain_exec_tools import _build_staging
 
     staging, staged_info, errors, skipped = _build_staging(refs)
@@ -274,6 +276,9 @@ def _stage_conversation_files(work: Path, input_file_ids: Optional[List[str]]) -
         "staged_info": staged_info,
         "errors": [*errors, *stage_errors],
         "skipped": skipped,
+        # {file_id name -> the filename it stands for}; see _resolve_staged_aliases. Additive,
+        # so a caller that does not know about it is unaffected.
+        "aliases": _staged_aliases(staging),
     }
 
 
@@ -340,8 +345,14 @@ def run_opencode(
         _now = _sig_map(work, staged_sigs)
         pristine = {rel for rel, sig in staged_sigs.items()
                     if _now.get(rel) == sig}                    # read but not written
-        artifacts = _persist_artifacts(work, {_CONFIG_FILENAME, *pristine},
-                                       defer={r for r in staged_sigs if r not in pristine})
+        # A peer that writes through the opaque file_id name must not deliver the result under
+        # it: layers_for_artifacts below sniffs by extension, so a .geojson written that way
+        # would never become a map layer.
+        alias_names = _resolve_staged_aliases(work, staging.get("aliases") or {},
+                                              staged_sigs, pristine)
+        artifacts = _persist_artifacts(work, {_CONFIG_FILENAME, *pristine, *alias_names},
+                                       defer={r for r in staged_sigs
+                                              if r not in pristine and r not in alias_names})
         # No tools means no add_map_layer means nothing checked what this wrote. See
         # layer_qa.inspect_artifacts.
         from agent_runtime.layer_qa import inspect_artifacts
