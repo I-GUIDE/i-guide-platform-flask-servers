@@ -257,3 +257,61 @@ def test_every_reserved_name_gets_a_distinct_neutral_name(monkeypatch, tmp_path)
     assert m["opencode.jsonc"] == "uploaded_opencode.jsonc", m
     assert m["AGENTS.md"] == "uploaded_AGENTS.md", m
     assert len(set(m.values())) == len(m), f"neutral names must be distinct: {m}"
+
+
+# --- the kill switches are the PRIMARY control ---------------------------------------------
+# A filename denylist has to enumerate every path a third-party binary reads, and
+# Dockerfile.opencode builds with OPENCODE_VERSION=latest — a release that adds a discovery
+# path reopens the hole with no change here and the suite still green. opencode ships two env
+# flags that close the class at the source; the rename list is defence in depth behind them.
+
+def test_the_container_disables_project_config_discovery():
+    """Without this, /work/opencode.jsonc merges AFTER $OPENCODE_CONFIG and wins."""
+    import agent_runtime.opencode_peer as ocp
+
+    argv = ocp.build_docker_argv(pathlib.Path("/tmp/w"), "n", "model", "prompt")
+    assert "OPENCODE_DISABLE_PROJECT_CONFIG=true" in argv, argv
+    assert "OPENCODE_CONFIG=/work/opencode.json" in argv, (
+        "the generated config still loads through the env var, which the flag does not gate")
+
+
+def test_the_container_disables_the_claude_md_instruction_file():
+    """opencode's instruction list is AGENTS.md, CLAUDE.md, CONTEXT.md, and systemPaths breaks
+    on the first match — so renaming AGENTS.md aside only promotes CLAUDE.md."""
+    import agent_runtime.opencode_peer as ocp
+
+    argv = ocp.build_docker_argv(pathlib.Path("/tmp/w"), "n", "model", "prompt")
+    assert "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=true" in argv, argv
+
+
+def test_the_rest_of_the_instruction_list_is_reserved_too(monkeypatch, tmp_path):
+    for name in ("CLAUDE.md", "CONTEXT.md"):
+        _, _, seen, _ = _run_with_upload(monkeypatch, tmp_path / name, name, "CANARY\n")
+        assert name not in seen["files"], (
+            f"{name} is in opencode's instructionFiles; got {seen['files']}")
+        assert seen["bodies"][f"uploaded_{name}"] == "CANARY\n"
+
+
+def test_a_dot_opencode_upload_cannot_reach_the_work_dir_as_a_dot_file(monkeypatch, tmp_path):
+    """A red-team pass reported `.opencode` as an upload-triggered DoS: opencode collects it as
+    a config DIRECTORY via an fs.exists test (not isDir), then reads `.opencode/opencode.json`
+    and dies before any model call. The CLI-side mechanism is real, but the CONVERSATION-UPLOAD
+    route is not: the file store runs every name through werkzeug secure_filename, which strips
+    the leading dot, so the upload is stored — and staged — as plain `opencode`. Pinned here so
+    a future change to that sanitisation does not quietly open the vector."""
+    from werkzeug.utils import secure_filename
+
+    assert secure_filename(".opencode") == "opencode"
+    _, _, seen, _ = _run_with_upload(monkeypatch, tmp_path, ".opencode", "not a directory\n")
+    assert ".opencode" not in seen["files"], seen["files"]
+    assert "opencode" in seen["files"], seen["files"]
+
+
+def test_dot_opencode_is_still_reserved_for_the_unsanitised_route():
+    """_resolve_allowed_path stages a local file under an unsanitised host_path.name, so the
+    name is kept in the reserved set as depth even though uploads cannot produce it."""
+    import agent_runtime.opencode_peer as ocp
+
+    assert ocp.reserved_rename_map([".opencode"]) == {".opencode": "uploaded_.opencode"}
+    # and the neutral name is no longer dot-prefixed, so _persist_artifacts hands it back
+    assert not "uploaded_.opencode".startswith(".")

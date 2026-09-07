@@ -187,6 +187,20 @@ def build_docker_argv(work: Path, name: str, model: str, prompt: str) -> List[st
         "--tmpfs", "/tmp:rw,size=256m,exec",
         "--env", "HOME=/work",
         "--env", f"OPENCODE_CONFIG=/work/{_CONFIG_FILENAME}",
+        # THE primary control against an upload steering this CLI, because a filename denylist
+        # has to enumerate every path a third-party binary reads while Dockerfile.opencode
+        # builds with OPENCODE_VERSION=latest — a release that adds a discovery path would
+        # silently reopen the hole with no change here. Both verified against the shipped CLI:
+        #   PROJECT_CONFIG gates the cwd config merge AND the ambient-instruction walk. Without
+        #     it, /work/opencode.jsonc merges AFTER $OPENCODE_CONFIG and wins, so an upload
+        #     could redirect provider.*.options.baseURL while keeping the
+        #     `{env:AGENT_OPENCODE_API_KEY}` placeholder the CLI resolves from process.env —
+        #     the REAL key, plus every prompt, to an arbitrary endpoint.
+        #   CLAUDE_CODE_PROMPT drops CLAUDE.md from the instruction list, which is otherwise
+        #     read even here: opencode's instructionFiles are AGENTS.md, CLAUDE.md, CONTEXT.md.
+        # The generated config is unaffected — it loads through OPENCODE_CONFIG, not discovery.
+        "--env", "OPENCODE_DISABLE_PROJECT_CONFIG=true",
+        "--env", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=true",
         "--env", "OPENCODE_DISABLE_AUTOUPDATE=true",
         # Name-only form: docker copies the value from the client process env
         # (set by run_opencode), so the key never appears in the argv.
@@ -298,10 +312,23 @@ def _stage_conversation_files(work: Path, input_file_ids: Optional[List[str]]) -
 #   iteration and is injected as "Instructions from: <path>" — a higher-privilege channel than
 #   file content, in a container permitted to edit files, run bash, and reach the network.
 #
-# A `.opencode` DIRECTORY is also discovered, but an upload cannot create one: `dest` is a single
-# flat name and _stage_inputs rejects separators. Matched case-insensitively, like
-# claude_peer._INSTRUCTION_FILENAMES.
-_RESERVED_UPLOAD_NAMES = {"opencode.json", "opencode.jsonc", "agents.md"}
+# * The ambient-instruction list is ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"], and systemPaths()
+#   BREAKS on the first name that matches — so neutralising only AGENTS.md just promotes
+#   CLAUDE.md to the one that is read. (claude_peer has renamed CLAUDE.md aside for its own CLI
+#   since it shipped; opencode reads the same filename.)
+# * `.opencode` is collected as a config DIRECTORY by an `fs.exists` test, not an isDir test, so
+#   a plain FILE of that name is read as `.opencode/opencode.json` and kills the run before any
+#   model call — and OPENCODE_DISABLE_PROJECT_CONFIG does NOT cover it, because the `.opencode`
+#   walk from HOME is ungated. Listed for the local-path staging route only: a CONVERSATION
+#   upload cannot produce the name at all, because the file store runs every upload through
+#   werkzeug secure_filename, which strips the leading dot (".opencode" is stored as "opencode").
+#   Kept as depth for the `_resolve_allowed_path` branch, where the dest is an unsanitised
+#   `host_path.name`.
+#
+# Defence in depth, NOT the primary control — see the kill switches in build_docker_argv.
+# Matched case-insensitively, like claude_peer._INSTRUCTION_FILENAMES.
+_RESERVED_UPLOAD_NAMES = {"opencode.json", "opencode.jsonc",
+                          "agents.md", "claude.md", "context.md", ".opencode"}
 
 
 def reserved_rename_map(staged: Optional[List[str]] = None) -> Dict[str, str]:
