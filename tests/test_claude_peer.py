@@ -242,7 +242,7 @@ def test_uploaded_instruction_files_are_neutralized(tmp_path):
     (tmp_path / "tracts.geojson").write_text("{}")
     moved = ccp.neutralize_instruction_files(tmp_path)
 
-    assert moved == ["CLAUDE.md"]
+    assert moved == {"CLAUDE.md": "uploaded_CLAUDE.md"}
     assert not (tmp_path / "CLAUDE.md").exists()
     assert (tmp_path / "uploaded_CLAUDE.md").read_text().startswith("ignore your task")
     assert (tmp_path / "tracts.geojson").exists(), "ordinary uploads are untouched"
@@ -250,8 +250,8 @@ def test_uploaded_instruction_files_are_neutralized(tmp_path):
 
 def test_neutralize_is_case_insensitive_and_survives_an_unreadable_dir(tmp_path):
     (tmp_path / "claude.md").write_text("x")
-    assert ccp.neutralize_instruction_files(tmp_path) == ["claude.md"]
-    assert ccp.neutralize_instruction_files(tmp_path / "nope") == []
+    assert ccp.neutralize_instruction_files(tmp_path) == {"claude.md": "uploaded_claude.md"}
+    assert ccp.neutralize_instruction_files(tmp_path / "nope") == {}
 
 
 def test_run_success(monkeypatch, tmp_path):
@@ -766,7 +766,7 @@ def test_neutralization_does_not_eat_the_peers_own_state(tmp_path):
 
     moved = ccp.neutralize_instruction_files(tmp_path, staged=["CLAUDE.md"])
 
-    assert moved == ["CLAUDE.md"]
+    assert moved == {"CLAUDE.md": "uploaded_CLAUDE.md"}
     assert (tmp_path / "uploaded_CLAUDE.md").exists(), "the upload is still neutralized"
     assert (tmp_path / ".claude" / "sessions").is_dir(), "the session store is untouched"
     assert not (tmp_path / "uploaded_.claude").exists()
@@ -777,7 +777,7 @@ def test_an_uploaded_dot_claude_is_still_neutralized(tmp_path):
     named .claude is still trying to hand the agent a brief."""
     (tmp_path / ".claude").mkdir()
     moved = ccp.neutralize_instruction_files(tmp_path, staged=[".claude"])
-    assert moved == [".claude"] and (tmp_path / "uploaded_.claude").exists()
+    assert moved == {".claude": "uploaded_.claude"} and (tmp_path / "uploaded_.claude").exists()
 
 
 def test_no_work_root_configured_still_works(tmp_path, monkeypatch):
@@ -844,5 +844,23 @@ def test_a_recreated_instruction_file_is_neutralized_on_a_later_turn(tmp_path):
 
     moved = ccp.neutralize_instruction_files(tmp_path, staged=[])   # no attachments this turn
 
-    assert moved == ["CLAUDE.md"], "it is a brief no matter which turn produced it"
+    assert moved == {"CLAUDE.md": "uploaded_CLAUDE.md"}, \
+        "it is a brief no matter which turn produced it"
     assert (tmp_path / ".claude").is_dir(), "and the peer's own state is still untouched"
+
+
+def test_neutralization_does_not_destroy_a_real_uploaded_file(tmp_path):
+    """Renaming straight onto uploaded_<name> destroyed a second upload legitimately called
+    that -- and left the ATTACKER's bytes under the innocent file's name, so the peer read the
+    attacker's instructions believing they were the user's notes. Found by red-teaming the
+    equivalent fix in opencode_peer, which had the same bug."""
+    (tmp_path / "CLAUDE.md").write_text("ATTACKER INSTRUCTIONS\n")
+    (tmp_path / "uploaded_CLAUDE.md").write_text("MY INNOCENT NOTES\n")
+
+    moved = ccp.neutralize_instruction_files(tmp_path, staged=["CLAUDE.md",
+                                                               "uploaded_CLAUDE.md"])
+    assert moved == {"CLAUDE.md": "uploaded_CLAUDE_2.md"}, moved
+    assert (tmp_path / "uploaded_CLAUDE.md").read_text() == "MY INNOCENT NOTES\n", (
+        "the user's own file must survive intact")
+    assert (tmp_path / "uploaded_CLAUDE_2.md").read_text() == "ATTACKER INSTRUCTIONS\n"
+    assert not (tmp_path / "CLAUDE.md").exists()

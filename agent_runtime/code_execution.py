@@ -813,6 +813,28 @@ def _sig_map(directory: Path, names: Iterable[str]) -> Dict[str, Tuple[int, int]
     return out
 
 
+def unclaimed_name(candidate: str, taken) -> str:
+    """*candidate*, or ``<stem>_2<ext>``, ``_3``… until it collides with nothing in *taken*.
+
+    Both CLI peers move an upload aside when it lands on a name the sandboxed CLI treats as
+    configuration or instructions. Renaming straight onto ``uploaded_<name>`` destroys a second
+    upload legitimately called that — and leaves the ATTACKER's bytes sitting under the innocent
+    file's name, which is worse than losing it.
+    """
+    taken = {str(t) for t in taken}
+    if candidate not in taken:
+        return candidate
+    stem, dot, ext = str(candidate).rpartition(".")
+    if not dot:
+        stem, ext = str(candidate), ""
+    else:
+        ext = f".{ext}"
+    n = 2
+    while f"{stem}_{n}{ext}" in taken:
+        n += 1
+    return f"{stem}_{n}{ext}"
+
+
 def _staged_aliases(input_files: Optional[List[Dict[str, str]]]) -> Dict[str, str]:
     """{alias dest -> the human filename it stands for}, from the staging specs."""
     out: Dict[str, str] = {}

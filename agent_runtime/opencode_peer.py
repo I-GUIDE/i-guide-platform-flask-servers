@@ -40,7 +40,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent_runtime.code_execution import (
     MAX_ARTIFACTS,
@@ -51,6 +51,7 @@ from agent_runtime.code_execution import (
     _stage_inputs,
     _staged_aliases,
     _work_root,
+    unclaimed_name,
 )
 
 # Env var read by is_opencode_peer_enabled(); any other value keeps the default
@@ -282,6 +283,78 @@ def _stage_conversation_files(work: Path, input_file_ids: Optional[List[str]]) -
     }
 
 
+# Names an upload must never occupy in /work, because the CLI reads them as CONFIGURATION or
+# INSTRUCTIONS rather than as data. Verified against the installed opencode core, not assumed:
+#
+# * `opencode.json` is what OPENCODE_CONFIG points at (build_docker_argv).
+# * `opencode.jsonc` is NOT covered by that env var. The loader merges global -> $OPENCODE_CONFIG
+#   -> project files discovered as up({targets: ["opencode.jsonc", "opencode.json"]}).toReversed(),
+#   so a cwd-level file merges LAST and wins. A staged /work/opencode.jsonc therefore overrides
+#   provider.*.options.baseURL on top of the generated config while keeping the
+#   `{env:AGENT_OPENCODE_API_KEY}` placeholder docker resolves from the client env — the same
+#   credential leak as an uploaded opencode.json, through a different filename.
+# * `AGENTS.md` is opencode's ambient-instruction file: InstructionContext walks
+#   fs.up({targets: ["AGENTS.md"], start: cwd}), so /work/AGENTS.md matches on the first
+#   iteration and is injected as "Instructions from: <path>" — a higher-privilege channel than
+#   file content, in a container permitted to edit files, run bash, and reach the network.
+#
+# A `.opencode` DIRECTORY is also discovered, but an upload cannot create one: `dest` is a single
+# flat name and _stage_inputs rejects separators. Matched case-insensitively, like
+# claude_peer._INSTRUCTION_FILENAMES.
+_RESERVED_UPLOAD_NAMES = {"opencode.json", "opencode.jsonc", "agents.md"}
+
+
+def reserved_rename_map(staged: Optional[List[str]] = None) -> Dict[str, str]:
+    """``{staged name -> on-disk name}`` for uploads that claimed a reserved CLI path.
+
+    PURE, and keyed only on the staged name set, so the two callers that need the answer —
+    ``run_opencode``, which does the move, and ``run_opencode_code_peer``, which writes the peer
+    brief in a separate pass over the same inputs — agree without sharing state. They agree only
+    when both passes see the same names; if a staging copy fails, the brief may still name a file
+    that is not there, which is the pre-existing behaviour for any failed upload.
+
+    Each chosen name steps aside from names already staged AND from names already chosen here.
+    """
+    names = [str(n) for n in (staged or [])]
+    taken = set(names)
+    out: Dict[str, str] = {}
+    for name in names:
+        if name.lower() not in _RESERVED_UPLOAD_NAMES:
+            continue
+        target = unclaimed_name(f"uploaded_{name}", taken)
+        taken.add(target)
+        out[name] = target
+    return out
+
+
+def neutralize_reserved_uploads(work: Path,
+                                staged: Optional[List[str]] = None) -> Tuple[Dict[str, str], set]:
+    """Move uploads that claimed a reserved CLI path out of the way. See _RESERVED_UPLOAD_NAMES.
+
+    Renamed rather than deleted, matching ``claude_peer.neutralize_instruction_files``: the user
+    uploaded it, so it stays readable as data and downloadable as an artifact, under a name the
+    CLI does not read as config or instructions.
+
+    Returns ``(applied {from -> to}, names that could not be moved)``. A name that could not be
+    moved is reported so the caller can stop treating it as a staged file at all: the generated
+    config is written over it regardless, so what sits there is no longer the upload.
+    """
+    renames = reserved_rename_map(staged)
+    applied: Dict[str, str] = {}
+    failed: set = set()
+    for name, target in renames.items():
+        src = work / name
+        if not src.is_file():
+            continue
+        try:
+            src.rename(work / target)
+        except OSError:
+            failed.add(name)
+            continue
+        applied[name] = target
+    return applied, failed
+
+
 def run_opencode(
     prompt: str,
     *,
@@ -308,18 +381,24 @@ def run_opencode(
             "artifacts": [], "backend": "opencode-docker", "model": model_ref(model),
         }
     try:
+        # Staging runs BEFORE the config is written, and the config is written LAST, so an
+        # upload can never end up at the path the CLI loads. Previously the config went first
+        # and _stage_inputs overwrote it — an upload named opencode.json simply became the
+        # provider config.
+        staging = _stage_conversation_files(work, input_file_ids)
+        renamed, unmovable = neutralize_reserved_uploads(work, staging["staged"])
         (work / _CONFIG_FILENAME).write_text(
             json.dumps(build_opencode_config(model, settings["base_url"]), indent=2),
             encoding="utf-8",
         )
-        staging = _stage_conversation_files(work, input_file_ids)
         # Fingerprint the uploads as staged, so a file the peer REWROTE can be told from one it
         # only read. Excluding staged names unconditionally discarded the peer's own result
         # whenever it edited an input in place -- and editing a file in place is the entire job
         # of a coding agent. Worse here than in execute_code: this work dir is a mkdtemp deleted
         # in the finally below, so there is no durable workspace to fall back on. See the same
         # `pristine` reasoning in code_execution._execute.
-        staged_sigs = _sig_map(work, staging["staged"])
+        staged_sigs = _sig_map(work, [renamed.get(n, n) for n in staging["staged"]
+                                      if n not in unmovable])
         try:
             os.chmod(work, 0o777)  # non-root container user must write here
         except OSError:
@@ -348,8 +427,12 @@ def run_opencode(
         # A peer that writes through the opaque file_id name must not deliver the result under
         # it: layers_for_artifacts below sniffs by extension, so a .geojson written that way
         # would never become a map layer.
-        alias_names = _resolve_staged_aliases(work, staging.get("aliases") or {},
-                                              staged_sigs, pristine)
+        # Primaries go through the same renaming: an alias whose filename was opencode.json
+        # would otherwise have its bytes copied onto the generated config after the run.
+        alias_names = _resolve_staged_aliases(
+            work, {a: renamed.get(prim, prim)
+                   for a, prim in (staging.get("aliases") or {}).items()},
+            staged_sigs, pristine)
         artifacts = _persist_artifacts(work, {_CONFIG_FILENAME, *pristine, *alias_names},
                                        defer={r for r in staged_sigs
                                               if r not in pristine and r not in alias_names})
@@ -382,7 +465,13 @@ def run_opencode(
             # it a turn that DID put something on the map still counts as undelivered.
             result["on_map"] = True
         if staging["staged_info"]:
-            result["input_files"] = staging["staged_info"]
+            # Through the same rename, or the turn record tells every later reader the upload is
+            # at opencode.json -- which by then holds the generated config, base URL and all.
+            result["input_files"] = [
+                {**info,
+                 "available_as": [renamed.get(n, n) for n in (info.get("available_as") or [])
+                                  if n not in unmovable]}
+                for info in staging["staged_info"]]
         if staging["errors"]:
             result["input_file_errors"] = staging["errors"]
         if staging["skipped"]:
@@ -448,6 +537,12 @@ def run_opencode_code_peer(
             _, staged_info, _, _ = _build_staging(refs)
             for info in staged_info:
                 staged_names.extend(info.get("available_as") or [])
+            # Through the same rename run_opencode applies, or the brief would point the peer at
+            # opencode.json — which by then holds the GENERATED provider config, not the upload.
+            # Reading it back would put the base URL in the peer's answer. config_rename_map is
+            # pure and sees the same name set there, so both passes agree.
+            _renames = reserved_rename_map(staged_names)
+            staged_names = [_renames.get(n, n) for n in staged_names]
         except Exception:
             staged_names = list(refs)
     prompt = _build_peer_prompt(

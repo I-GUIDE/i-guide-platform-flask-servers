@@ -84,6 +84,7 @@ from agent_runtime.code_execution import (
     _resolve_staged_aliases,
     _sig_map,
     _work_root,
+    unclaimed_name,
 )
 from agent_runtime.opencode_peer import (
     CODE_PEER_ENV,
@@ -498,7 +499,8 @@ def build_docker_argv(work: Path, name: str, model: str, prompt: str,
     return argv
 
 
-def neutralize_instruction_files(work: Path, staged: Optional[List[str]] = None) -> List[str]:
+def neutralize_instruction_files(work: Path,
+                                staged: Optional[List[str]] = None) -> Dict[str, str]:
     """Rename anything a user UPLOADED that the CLI would read as INSTRUCTIONS.
 
     A file called ``CLAUDE.md`` is not data to a Claude Code session — it is a
@@ -517,14 +519,20 @@ def neutralize_instruction_files(work: Path, staged: Optional[List[str]] = None)
 
     Renamed rather than deleted: the user uploaded it, so it stays available as
     data and as a downloadable artifact under a name that is not a directive.
-    Returns the names that were moved.
+    Returns ``{original name -> the name it was moved to}``.
+
+    The target steps aside from names already present. Renaming straight onto
+    ``uploaded_<name>`` destroyed a second upload legitimately called that — and
+    left the ATTACKER's bytes under the innocent file's name, so the peer read
+    the attacker's instructions believing they were the user's own notes.
     """
-    moved: List[str] = []
+    moved: Dict[str, str] = {}
     allowed = {str(n) for n in (staged or [])}
     try:
         entries = list(work.iterdir())
     except OSError:
         return moved
+    taken = {e.name for e in entries}
     for entry in entries:
         if entry.name.lower() not in _INSTRUCTION_FILENAMES:
             continue
@@ -536,12 +544,13 @@ def neutralize_instruction_files(work: Path, staged: Optional[List[str]] = None)
         if (entry.name.lower() == ".claude" and staged is not None
                 and entry.name not in allowed):
             continue
-        target = entry.with_name(f"uploaded_{entry.name}")
+        target_name = unclaimed_name(f"uploaded_{entry.name}", taken)
         try:
-            entry.rename(target)
-            moved.append(entry.name)
+            entry.rename(entry.with_name(target_name))
         except OSError:
             continue
+        taken.add(target_name)
+        moved[entry.name] = target_name
     return moved
 
 
@@ -621,7 +630,7 @@ def run_claude(
         # edited SHOULD be sent again" -- but the staged half of the same expression was not,
         # so a peer that cleaned an attached file in place had that result withheld.
         staged_sigs = _sig_map(
-            work, set(staging["staged"]) | {f"uploaded_{n}" for n in renamed})
+            work, set(staging["staged"]) | set(renamed.values()))
         try:
             os.chmod(work, 0o777)  # non-root container user must write here
         except OSError:
