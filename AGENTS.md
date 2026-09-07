@@ -42,10 +42,20 @@ panel. Node 18+ required.
 python3 -m pytest rag_pipeline/tests/ -q
 ```
 
-Baseline is **649 passed, 1 skipped, 0 failed**. If something fails, it is yours.
+Baseline is **1071 passed, 2 skipped, 0 failed**, in about 90 s. If something fails, it is
+yours — which is only a usable rule while the number is current, so re-measure it rather than
+trusting this line. It has been wrong before: it read 649 for long enough that a whole run's
+worth of tests had been added underneath it.
 
-That baseline was reached by fixing a test everyone had learned to ignore, and the way it hid
-is worth knowing because it will happen again. `test_spatial_routing_e2e.py` suppresses the
+Both skips name a live backend — one opt-in (`RUN_REAL_OPEN_GEODATA_TEST=1`), one unreachable
+(rs-embed) — never a test that was given up on. A test that needs a live service and FAILS
+without one is the thing to fix, not the thing to remember: eight of those became background
+noise that a real regression could have hidden inside, and the one that came back —
+`test_an_explicit_bbox_is_still_honoured`, which reaches the model check only when rs-embed
+answers the catalogue — now skips with the reason instead.
+
+The baseline was first reached by fixing a test everyone had learned to ignore, and the way it
+hid is worth knowing because it will happen again. `test_spatial_routing_e2e.py` suppresses the
 non-spatial retrieval sources so it can assert every document came from the spatial one. It
 patched `rag_pipeline.search.keyword.retrieve_keyword` — but `core.py` does `from .keyword
 import retrieve_keyword`, a from-import that binds the function into `core`'s namespace at
@@ -56,7 +66,7 @@ actually runs is `get_neo4j_agent_results`, not the `retrieve_neo4j` fallback be
 
 The failure was misattributed for a long time to the missing spaCy model `en_core_web_sm`,
 because that logs a loud warning on import of `rag_pipeline/search/spatial.py`. It is a red
-herring for this test: with no model, `_extract_place_candidates` falls back to
+herring for this test: with no model, `extract_locations_from_query` falls back to
 `_capitalized_candidates`, which handles the test's query fine. Installing the model is still
 worth doing — production entity extraction runs on a weaker regex path without it — but it
 fixes nothing here.
@@ -75,15 +85,31 @@ retired 404s at request time instead of being absent from the picker.
 
 Two providers are wired:
 
-- **OpenAI** — the default. The `gpt-5.x` family and the o-series accept `reasoning_effort`;
-  the accepted values are `none`, `low`, `medium`, `high`, `xhigh`. **Not** `minimal`, which
-  some docs list and `gpt-5.6-luna` rejects. `supports_reasoning_effort()` decides, and the
-  argument is dropped for models that would refuse it, so a UI leaving the control set while
-  switching to gpt-4o cannot break the request.
+- **OpenAI** — the default. `reasoning_effort` accepts `none`, `low`, `medium`, `high`,
+  `xhigh` — **not** `minimal`, which some docs list and `gpt-5.6-luna` rejects. But those five
+  are the request-VALIDATION set; with function tools attached, which is how this agent always
+  calls, almost nothing takes a real level. Probed per model, three times each
+  (`_TOOL_EFFORT`, `executor_factory.py:317-351`): `gpt-4o` and `gpt-4.1` refuse the argument
+  outright; `gpt-5.6-*` REQUIRE `'none'`; `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini` accept only
+  `'none'`; `o4-mini` takes any level but rejects `'none'`; and `gpt-5.2` is the one id that
+  can both call tools and think harder on request. A prefix rule got this wrong in both
+  directions and produced hard 400s mid-turn, which is why the table is per-model and not a
+  rule. `supports_reasoning_effort()` and `resolve_effort()` coerce rather than raise, so a UI
+  leaving the control set while switching to gpt-4o cannot break the request.
 - **AnvilGPT** (Purdue RCAC, Open WebUI) — set `AGENT_LLM_PROVIDER=anvilgpt` for the
   process default, or select a model per request. Its ids look like `qwen3.6:27b`, NOT the
   HuggingFace `Qwen/Qwen3.6-27B` form a vLLM server uses; a wrong id 404s. Chat lives at
   `/api/chat/completions`, which `normalize_openai_base_url` reduces to the `/api` base.
+
+**Two ids refuse an explicit temperature, and this agent sends `temperature=0.0` on every
+OpenAI build.** That made `gpt-5.5` and `o4-mini-2025-04-16` 100% unusable from the picker —
+every tool-bound call answered HTTP 400 *"Unsupported value: 'temperature' does not support 0.0
+with this model. Only the default (1) value is supported."* — until the argument was dropped for
+those two (`_NO_TEMPERATURE` / `supports_temperature()`, `executor_factory.py:387`). Measured by
+sweeping every OpenAI id the picker offers: those two fail, the other nine accept 0.0, and both
+succeed with the parameter simply omitted. A deny-list rather than a blanket removal, because
+determinism is worth keeping everywhere it IS accepted. Two further ids are no longer offered at
+all: `gpt-5.5-pro` (*"This is not a chat model"*) and `gpt-5.3-chat-latest` (deprecated).
 
 **Do not set `max_tokens` for a reasoning model.** qwen3.6:27b and the gpt-5.x line spend
 their first tokens on reasoning and only then write `content`, so a tight ceiling returns
@@ -151,6 +177,20 @@ An analysis result reaches the user as an **interactive map layer**, not a file 
 - `render_map_image`, `heatmap_image`, `choropleth_image` and `qgis_map_image` are the other,
   separate route: a static PNG that cannot be panned, zoomed or clicked. Do not describe one
   as being "on the map".
+- **A layer's id IS its identity** — the client REPLACES a layer whose id matches. `slug[:40]`
+  therefore collapsed two layers into one the moment a region name pushed the discriminator past
+  the cut: no error, no log, and the tool still reported the layer delivered. `_slug_id`
+  (`map_layers.py:27`) appends a digest of the whole slug beyond that length. For the rs-embed
+  layers the id is a digest of what the layer SHOWS — region, model, period, parameters, inputs
+  — and deliberately excludes the caller's `name` (`_layer_id`, `rs_embed_tools.py:263`), because
+  the model calls the same box something different next turn and an id that moved with the
+  wording stacked a duplicate on every re-run.
+- **One call can deliver several layers.** `embed_zones` emits the pixel raster AND the zone
+  groups, `embed_region` one per model; they travel under the plural `map_layers`, with
+  `map_layer` holding only the first, so code reading the singular alone keeps one and silently
+  drops the rest. `build_map_layers` (`map_layers.py:150`) reads the plural. In the layer list a
+  name is clipped at ~158px, so the distinguishing tag LEADS (`_layer_label`,
+  `rs_embed_tools.py:290`) — appended, it is exactly the part thrown away.
 - **Geometry never goes into the LLM-visible documents.** Evidence documents carry titles and
   abstracts; footprints and coordinates go to the map on the side channel. Widening the
   documents floods the context and gets truncated.
@@ -263,7 +303,8 @@ while, on the peer being tuned, it did not exist.
 - **code** — `default_code_fn`, `supervisor/graph.py:3290-3413`. A near-duplicate of the analyze
   block, carrying skills and a two-tool KB slice in place of retrieval. The two are separate
   literal lists; editing one does not touch the other.
-- **search** — `make_langchain_granular_tools` (`langchain_granular_tools.py:481`), which
+- **search** — `make_langchain_granular_tools` (`agent_runtime/langchain_granular_tools.py:481`,
+  not the five-line re-export shim of the same name under `rag_pipeline/`), which
   `collect_tools` builds for `tool_strategy="granular"` and then tops up with MCP, quality and
   skill tools. `admin_boundary`'s third registration is at `:650`.
 
@@ -306,8 +347,9 @@ omission rather than by error:
   `_map_delivered_this_turn` (`:1383`) instead.
 - The name sets in `graph_state.py:26-93`, which `select_allowed_tools` (`tool_policy.py:26`)
   filters an intent's tools against.
-- A capability statement in `prompts.py` — what the tool can do and what the route costs. Not a
-  mandate; see **Conventions that are deliberate**.
+- A capability statement in `agent_runtime/prompts.py`, and in `supervisor/prompts.py` if the
+  supervisor must know the route exists — what the tool can do and what it costs, not an
+  instruction to use it; see **Conventions that are deliberate**.
 - `docs/spatial-toolkit.html`, per `docs/README.md`.
 
 **Verify by enumeration, not by reading the diff.** The command under **The tool surface** lists
@@ -344,7 +386,7 @@ Measured consequences, all from one exchange:
   drifting into SoilGrids *soil* clay — until the payload hit 66,275 tokens against a 65,536
   window and the turn died with a 400. One clay turn reached 199,605.
 * `admin_boundary` must be registered in three peers under three different gating rules
-  (25 `tools.extend` sites in `supervisor/graph.py`). One copy ended up nested inside
+  (27 `tools.extend` sites in `supervisor/graph.py`). One copy ended up nested inside
   `if input_file_ids:` — the exact gate its own comment said to avoid — so with nothing
   attached the tool did not exist, and every model fell back to embedding a rectangle around a
   city centroid. Two rounds of tool-description tuning could not fix a tool that was absent.
@@ -461,10 +503,14 @@ surfaced as an empty stderr.
 into `AGENT_CODE_EXEC_IMAGE` is reinstalled on every run regardless. `sandbox/Dockerfile`
 promised that saving for a long time without delivering it. What delivers it is
 `preinstalled()`: the executor runs the image once per process (`--network none`,
-`--read-only`, same posture as a real run), asks `find_spec` which of `_IMPORT_TO_PIP` it can
-import, and drops those from the install list. It is PROBED, never declared, because a
-declared list drifts: an image that stopped shipping a package would suppress an install the
-code needs and die on `ModuleNotFoundError` with nothing naming the cause. Every probe failure
+`--read-only`, same posture as a real run), IMPORTS each of `_IMPORT_TO_PIP`, and drops what
+succeeded from the install list. A real import, never `find_spec` — that locates a module's
+file without loading it, so it answers yes for a package whose extension module cannot link:
+measured, fiona and rasterio in a slim-based image find fine and then die on
+`ImportError: libexpat.so.1`, which turns a slow run into a broken one. Importing all twenty
+costs ~2.5 s, once per process. It is PROBED, never declared, because a declared list drifts:
+an image that stopped shipping a package would suppress an install the code needs and die on
+`ModuleNotFoundError` with nothing naming the cause. Every probe failure
 returns the empty set, i.e. exactly the old behaviour. Only unconstrained specs are dropped —
 `geopandas==0.14` must never be satisfied by whatever the image happens to carry.
 

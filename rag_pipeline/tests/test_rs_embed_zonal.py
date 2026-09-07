@@ -498,6 +498,13 @@ def test_the_redirect_still_leaves_a_way_to_get_a_pixel_image(tmp_path):
 
 
 def test_an_explicit_bbox_is_still_honoured():
+    """A bbox is not a polygon, so the redirect must not fire and the call reaches the MODEL check.
+
+    Reaching that check is the one thing in this file that needs the live service: the model name
+    is validated against the catalogue it serves. Unreachable is a SKIP, not a failure — a red
+    line on every laptop run is how a real regression hides, which is the whole point of the
+    live-backend guards elsewhere in the suite.
+    """
     import json
 
     from agent_runtime.rs_embed_tools import make_rs_embed_tools
@@ -505,7 +512,10 @@ def test_an_explicit_bbox_is_still_honoured():
     tools = {t.name: t for t in make_rs_embed_tools()}
     out = json.loads(tools["embed_region"].func(bbox=[-87.63, 41.84, -87.60, 41.87],
                                                 models=["definitely-not-a-model"]))
-    assert "unknown model" in out["error"], "the region check must be past, not blocking"
+    error = str(out.get("error") or "")
+    if "not reachable" in error:
+        pytest.skip(f"rs-embed not running: {error}")
+    assert "unknown model" in error, "the region check must be past, not blocking"
 
 
 def test_a_point_layer_may_still_use_its_extent(tmp_path):
