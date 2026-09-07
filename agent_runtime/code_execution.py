@@ -328,7 +328,8 @@ class ExecResult:
 
 
 def _persist_artifacts(work: Path, exclude: set, *,
-                       defer: Optional[set] = None) -> List[Dict[str, Any]]:
+                       defer: Optional[set] = None,
+                       dropped: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Persist files the run created in *work* to the agent file store.
 
     `defer` names files that only became artifacts because the run REWROTE an input. They are
@@ -349,7 +350,14 @@ def _persist_artifacts(work: Path, exclude: set, *,
         if str(rel) in exclude or (rel.parts and rel.parts[0] in {"__pycache__", DEPS_DIRNAME, PIPTMP_DIRNAME}):
             continue
         if len(artifacts) >= MAX_ARTIFACTS:
-            break
+            # Name what was dropped, through `dropped`. The bare `break` was silent, which is
+            # the same shape as the defect the exclusion narrowing fixes: a file the run really
+            # produced simply not existing, with ok=True and an empty stderr. Now more
+            # reachable, because rewritten inputs are candidates where they never used to be.
+            if dropped is None:
+                break
+            dropped.append(str(rel))
+            continue
         try:
             rec = create_output_file_from_path(path, filename=path.name)
             artifacts.append(
@@ -1000,10 +1008,12 @@ class CodeExecutor:
                         if after.get(rel) == sig}      # staged in and untouched -> still just an upload
             keep_out = {"script.py", *pristine, *unchanged}
             source_artifacts = _persist_source(code, label=label) if (code or "").strip() else []
+            over_cap: List[str] = []
             artifacts = [*source_artifacts,
                          *_persist_artifacts(
                              work, keep_out,
-                             defer={r for r in staged_sigs if r not in pristine})]
+                             defer={r for r in staged_sigs if r not in pristine},
+                             dropped=over_cap)]
             if workspace:
                 # Only `pristine` is skipped, not `staged`: an upload the run never touched stays
                 # out of the durable workspace (including its file_id-named twin), while one the
@@ -1017,6 +1027,11 @@ class CodeExecutor:
             size_note = _size_report(artifacts)
             if size_note:
                 stderr = (str(stderr or "") + "\n" + size_note).strip()
+            if over_cap:
+                stderr = (str(stderr or "")
+                          + f"\n[only the first {MAX_ARTIFACTS} output files were saved; "
+                          + f"{len(over_cap)} more were NOT: {over_cap[:8]}. "
+                          + "Write fewer files, or combine them, if you need those.]").strip()
             if stage_errors:
                 stderr = (str(stderr or "") + f"\n[input file staging errors: {stage_errors}]").strip()
             if shadowed:

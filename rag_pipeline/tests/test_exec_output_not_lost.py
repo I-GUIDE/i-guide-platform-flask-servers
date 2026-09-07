@@ -304,3 +304,30 @@ def test_rewritten_inputs_never_displace_the_runs_own_outputs(monkeypatch, tmp_p
     naive = [a["filename"] for a in ce._persist_artifacts(work, set())]
     assert any(n in naive for n in inputs), "sanity: undeferred, inputs do claim slots"
     assert not all(n in naive for n in outputs), "sanity: undeferred, outputs are displaced"
+
+
+def test_hitting_the_artifact_cap_is_reported_not_silent(monkeypatch, tmp_path):
+    """`_persist_artifacts` used to `break` at MAX_ARTIFACTS with no note anywhere: ok=True,
+    empty stderr, files simply absent. That is the same shape as the defect this module is
+    about, and narrowing the exclusion made it more reachable (rewritten inputs are candidates
+    where they never used to be). The run must be told which files did not make it."""
+    from agent_runtime.code_execution import LocalSubprocessExecutor, MAX_ARTIFACTS
+
+    _exec_env(monkeypatch, tmp_path)
+    specs = []
+    for i in range(MAX_ARTIFACTS):
+        src = _upload(tmp_path, f"a{i:02d}.csv", "orig\n")
+        specs.append({"source": str(src), "dest": f"a{i:02d}.csv"})
+
+    r = LocalSubprocessExecutor().execute(
+        "import glob\n"
+        "for f in sorted(glob.glob('a*.csv')): open(f,'w').write('CLEANED\\n')\n"
+        "open('zz_merged.csv','w').write('merged\\n')\n",
+        input_files=specs)
+
+    assert r.ok, r.stderr
+    names = [a["filename"] for a in r.artifacts]
+    assert "zz_merged.csv" in names, (
+        f"a rewritten input must never displace the run's own new output; got {names}")
+    assert "were NOT" in (r.stderr or ""), (
+        f"the cap truncation must be named, not silent; stderr={r.stderr!r}")
