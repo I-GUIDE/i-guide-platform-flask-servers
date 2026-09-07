@@ -137,9 +137,9 @@
   <header>
     <div class="eyebrow">I-GUIDE agent · deployed capability inventory</div>
     <h1>What this agent can analyse, and what it hands back</h1>
-    <p class="standfirst">Fifty-one spatial, statistical and temporal tools, plus a sandboxed Python runtime. Every tool returns
+    <p class="standfirst">Fifty-five spatial, statistical and temporal tools, plus a sandboxed Python runtime. Every tool returns
       <em>both</em> an interactive map layer and downloadable files where the operation produces geometry — the map is the
-      deliverable, not a screenshot of one. Enumerated from the running container, not from documentation.</p>
+      deliverable, not a screenshot of one. Enumerated from the tool registry itself, not written from documentation.</p>
   </header>
 
   <div class="counts">
@@ -147,10 +147,11 @@
     <div class="count"><b>6</b><span>aggregation</span></div>
     <div class="count"><b>7</b><span>spatial stats</span></div>
     <div class="count"><b>5</b><span>temporal</span></div>
-    <div class="count"><b>9</b><span>embeddings</span></div>
+    <div class="count"><b>10</b><span>embeddings</span></div>
     <div class="count"><b>8</b><span>vector + map</span></div>
     <div class="count"><b>4</b><span>KB + renders</span></div>
     <div class="count"><b>5</b><span>QGIS</span></div>
+    <div class="count"><b>3</b><span>workspace</span></div>
     <div class="count"><b>20</b><span>RS models</span></div>
   </div>
 
@@ -236,7 +237,7 @@
 
   <section>
     <div class="fam-head">
-      <h2>Satellite embeddings</h2><span class="n">9 tools</span>
+      <h2>Satellite embeddings</h2><span class="n">10 tools</span>
       <span class="src">rs_embed_tools → rs-embed service</span>
     </div>
     <p class="fam-note">Remote-sensing foundation models over a region you draw, a region you name, or every polygon in
@@ -252,6 +253,7 @@
       <div class="tool"><code>segment_region</code><p>Unsupervised segmentation into <em>k</em> look-alike zones from the embedding — land-cover-style, without labels.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>embedding_change</code><p>How much a region changed year over year, measured in embedding space rather than raw pixels.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>compare_regions</code><p>Cosine similarity between two regions: 1.0 means indistinguishable from space.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>align_embedding_colors</code><p>Re-renders several already-embedded regions on one shared PCA basis, so a colour means the same thing in every layer. Without it each region is normalised on its own pixels and the maps cannot honestly be read against each other. Re-uses the saved vectors, so it costs nothing at the imagery provider.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>predict_for_region</code><p>Run a pretrained downstream head on an embedding to predict a value — the "use the embedding" step.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>list_embedding_models</code><p>Which models are available and whether each is precomputed or run on the fly.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>list_prediction_heads</code><p>Which pretrained heads exist for turning an embedding into a prediction.</p><div class="out"><span class="chip file">File</span></div></div>
@@ -304,7 +306,7 @@
 
   <section>
     <div class="fam-head">
-      <h2>QGIS &amp; the escape hatch</h2><span class="n">6 tools</span>
+      <h2>QGIS &amp; the escape hatch</h2><span class="n">9 tools</span>
       <span class="src">langchain_granular_tools · langchain_exec_tools</span>
     </div>
     <p class="fam-note">When the toolkit doesn't cover it, the agent writes and runs code. Execution is a per-run Docker
@@ -317,6 +319,9 @@
       <div class="tool"><code>qgis_metric_buffer</code><p>A true metric buffer computed by QGIS in a projected CRS, then returned in WGS84.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>qgis_map_image</code><p>A headless PyQGIS render over an OSM basemap — a cartographic PNG rather than a plot.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>pyqgis_layer_summary</code><p>Inspect one vector or raster layer through standalone headless PyQGIS.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>write_workspace_file</code><p>Write a file into the conversation&rsquo;s working directory, so a script can be run by name instead of pasted whole into every call.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>read_workspace_file</code><p>Read one back &mdash; the script as it currently stands, or an output a run left behind.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>edit_workspace_file</code><p>Replace an exact snippet in a workspace file. A fix is a patch, not a re-emitted program: changing line 40 of a 200-line script costs one replacement rather than sending the whole script again. A snippet that does not appear exactly once is refused, because replacing one of three identical lines produces code that runs and is wrong.</p><div class="out"><span class="chip file">File</span></div></div>
     </div>
   </section>
 
@@ -335,8 +340,11 @@
       <li><strong>Prediction heads are not cached.</strong> <code>predict_for_region</code> and
         <code>list_prediction_heads</code> report none available until the demo head cache is built; embedding,
         segmentation, change and comparison are unaffected.</li>
-      <li><strong>Prerequisites are real, but a region no longer has to be drawn.</strong> The analysis tools still
-        load only once files are attached to the conversation &mdash; and if every attached file is a
+      <li><strong>Prerequisites are real, but a region no longer has to be drawn.</strong> Most analysis tools
+        load only once files are attached to the conversation &mdash; though not all: the satellite-embedding tools,
+        <code>admin_boundary</code>, <code>geocode_places</code> and <code>add_map_layer</code> are available with
+        nothing attached, because each can start from a place name, a drawn region, or geometry the agent already
+        holds. Among the upload-gated ones, if every attached file is a
         spreadsheet (<code>.csv</code>, <code>.tsv</code>, <code>.xlsx</code>), the four tools that need a
         <em>vector</em> file (<code>inspect_vector</code>, <code>vector_to_geojson</code>,
         <code>reproject_vector</code>, <code>vector_spatial_join</code>) are withheld rather than offered
@@ -352,8 +360,8 @@
   </div>
 
   <footer>
-    <span>Enumerated from the running <code>agent-api</code> container, 2026-09-03</span>
+    <span>Enumerated from the tool factories, 2026-09-06</span>
     <span>Branch <code>prototype</code></span>
-    <span>51 tools in eight families, plus <code>execute_code</code> and four file tools</span>
+    <span>55 tools in eight families, plus <code>execute_code</code> and four file tools</span>
   </footer>
 </div>
