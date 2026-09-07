@@ -33,7 +33,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 def _num_env(name: str, default: float) -> float:
     """A numeric env var that tolerates being present but blank.
@@ -327,14 +327,24 @@ class ExecResult:
         }
 
 
-def _persist_artifacts(work: Path, exclude: set) -> List[Dict[str, Any]]:
-    """Persist files the run created in *work* to the agent file store."""
+def _persist_artifacts(work: Path, exclude: set, *,
+                       defer: Optional[set] = None) -> List[Dict[str, Any]]:
+    """Persist files the run created in *work* to the agent file store.
+
+    `defer` names files that only became artifacts because the run REWROTE an input. They are
+    real outputs and must be persisted, but they must not displace the run's own new files:
+    `exclude` is applied before the MAX_ARTIFACTS break, so once rewritten inputs started
+    counting toward the cap an alphabetically-later genuine output could be silently dropped —
+    trading the loss this narrowing was meant to fix for a different one. The sort is stable,
+    so ordering inside each group is unchanged.
+    """
     from agent_runtime.file_store import create_output_file_from_path
 
+    deferred = {str(x) for x in (defer or ())}
+    candidates = [p for p in sorted(work.rglob("*")) if p.is_file()]
+    candidates.sort(key=lambda p: str(p.relative_to(work)) in deferred)
     artifacts: List[Dict[str, Any]] = []
-    for path in sorted(work.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in candidates:
         rel = path.relative_to(work)
         if str(rel) in exclude or (rel.parts and rel.parts[0] in {"__pycache__", DEPS_DIRNAME, PIPTMP_DIRNAME}):
             continue
@@ -777,6 +787,24 @@ def _stat_map(directory: Path) -> Dict[str, Tuple[int, int]]:
     return out
 
 
+def _sig_map(directory: Path, names: Iterable[str]) -> Dict[str, Tuple[int, int]]:
+    """(size, mtime_ns) for the named top-level files — the staged-input baseline.
+
+    Same fingerprint `_stat_map` takes for carried workspace files, but taken for the
+    staged uploads right after they land, so a run that REWRITES an input can be told
+    apart from one that only read it. Built unconditionally: a sessionless run has no
+    `carried` baseline at all, and its uploads must still not be re-persisted.
+    """
+    out: Dict[str, Tuple[int, int]] = {}
+    for rel in names:
+        try:
+            st = (directory / rel).stat()
+        except OSError:
+            continue
+        out[rel] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
 def _copy_tree(src: Path, dst: Path, *, skip: Optional[set] = None) -> None:
     for p in src.rglob("*"):
         if not p.is_file():
@@ -950,6 +978,9 @@ class CodeExecutor:
                 (work / "script.py").write_text(code or "", encoding="utf-8")
             # Stage uploaded/input files into the work dir so the code can read them.
             staged, stage_errors, shadowed = _stage_inputs(work, input_files)
+            # Fingerprint the uploads as staged (copyfile stamps them with stage time, so this
+            # must be read off the staged copy, not the source) — see `pristine` below.
+            staged_sigs = _sig_map(work, staged)
             try:
                 os.chmod(work, 0o777)  # let a non-root container user write outputs
             except OSError:
@@ -957,14 +988,27 @@ class CodeExecutor:
             exit_code, stdout, stderr, timed_out, error = self._run(
                 work, timeout, deps, deps_cache=deps_cache, entrypoint=entrypoint)
             # Output files the run produced, plus the executed source itself (downloadable).
-            # Staged input files are excluded so uploads aren't re-persisted as outputs.
-            unchanged = {rel for rel, sig in _stat_map(work).items()
-                         if carried.get(rel) == sig}  # carried in and untouched -> not an output
+            # A file is NOT an output only if it came in and the run left it alone — judged the
+            # same way for both sources of incoming files: compare the (size, mtime_ns) it had on
+            # arrival with the one it has now. Excluding staged inputs by NAME instead used to
+            # discard a run's own result whenever it wrote to an input's name (`df.to_csv('data.csv')`
+            # on an attached upload — the common in-place edit), from the artifacts AND the workspace.
+            after = _stat_map(work)
+            unchanged = {rel for rel, sig in after.items()
+                         if carried.get(rel) == sig}   # carried in and untouched -> not an output
+            pristine = {rel for rel, sig in staged_sigs.items()
+                        if after.get(rel) == sig}      # staged in and untouched -> still just an upload
+            keep_out = {"script.py", *pristine, *unchanged}
             source_artifacts = _persist_source(code, label=label) if (code or "").strip() else []
             artifacts = [*source_artifacts,
-                         *_persist_artifacts(work, {"script.py", *staged, *unchanged})]
+                         *_persist_artifacts(
+                             work, keep_out,
+                             defer={r for r in staged_sigs if r not in pristine})]
             if workspace:
-                _copy_tree(work, workspace, skip={"script.py", *staged})
+                # Only `pristine` is skipped, not `staged`: an upload the run never touched stays
+                # out of the durable workspace (including its file_id-named twin), while one the
+                # run rewrote is a result and belongs there.
+                _copy_tree(work, workspace, skip={"script.py", *pristine})
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
             if auto:
@@ -977,8 +1021,10 @@ class CodeExecutor:
                 stderr = (str(stderr or "") + f"\n[input file staging errors: {stage_errors}]").strip()
             if shadowed:
                 stderr = (str(stderr or "") + f"\n[an attached upload was used for {shadowed} "
-                          "rather than the file of that name in the working directory; write "
-                          "your version under a different name to read it back]").strip()
+                          "rather than the file of that name in the working directory; you read "
+                          "the upload, and if you write that name your version replaces the "
+                          "working-directory file but the upload will shadow it again next run — "
+                          "use a different name for anything you need to read back]").strip()
             # Signal-killed runs carry no stderr; surface a cause so the agent can react.
             error = error or _diagnose_abnormal_exit(exit_code, stderr, error)
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,

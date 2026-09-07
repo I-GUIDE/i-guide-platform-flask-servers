@@ -271,7 +271,7 @@ def test_run_success(monkeypatch, tmp_path):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(ccp, "_persist_artifacts",
-                        lambda work, exclude: [{"filename": p.name} for p in work.iterdir()
+                        lambda work, exclude, **kw: [{"filename": p.name} for p in work.iterdir()
                                                if p.is_file() and not p.name.startswith(".")])
     res = ccp.run_claude("make a csv")
 
@@ -289,7 +289,7 @@ def test_run_reports_an_envelope_error_even_on_exit_zero(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
     monkeypatch.setattr(subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(
         argv, 0, json.dumps({"result": "hit the turn limit", "is_error": True}), ""))
-    monkeypatch.setattr(ccp, "_persist_artifacts", lambda work, exclude: [])
+    monkeypatch.setattr(ccp, "_persist_artifacts", lambda work, exclude, **kw: [])
     res = ccp.run_claude("something")
     assert res["ok"] is False
     assert res["answer"] == "hit the turn limit"
@@ -308,7 +308,7 @@ def test_run_timeout_kills_the_container(monkeypatch, tmp_path):
         raise subprocess.TimeoutExpired(argv, 35)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(ccp, "_persist_artifacts", lambda work, exclude: [])
+    monkeypatch.setattr(ccp, "_persist_artifacts", lambda work, exclude, **kw: [])
     res = ccp.run_claude("loop forever")
     assert res["ok"] is False and res["timed_out"] is True
     assert "30s" in res["error"]

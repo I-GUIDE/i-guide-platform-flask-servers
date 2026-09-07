@@ -46,6 +46,7 @@ from agent_runtime.code_execution import (
     MAX_ARTIFACTS,
     _clip,
     _host_user,
+    _sig_map,
     _stage_inputs,
     _work_root,
 )
@@ -207,22 +208,31 @@ def _timeout_seconds() -> int:
         return DEFAULT_OPENCODE_TIMEOUT
 
 
-def _persist_artifacts(work: Path, exclude: set) -> List[Dict[str, Any]]:
+def _persist_artifacts(work: Path, exclude: set, *,
+                       defer: Optional[set] = None) -> List[Dict[str, Any]]:
     """Persist files opencode left in *work* to the agent file store.
 
     Skips dot-prefixed top-level entries (opencode/HOME state: ``.local``,
     ``.config``, ``.cache``, …) and anything in *exclude* (the generated config,
     staged input files).
+
+    `defer` names files that only became artifacts because the run REWROTE an input. They are
+    real outputs and must be persisted, but they must not displace the run's own new files:
+    `exclude` is applied before the MAX_ARTIFACTS break, so once rewritten inputs started
+    counting toward the cap an alphabetically-later genuine output could be silently dropped —
+    trading the loss this narrowing was meant to fix for a different one. The sort is stable,
+    so ordering inside each group is unchanged.
     """
     try:
         from agent_runtime.file_store import create_output_file_from_path
     except Exception:
         return []
 
+    deferred = {str(x) for x in (defer or ())}
+    candidates = [p for p in sorted(work.rglob("*")) if p.is_file()]
+    candidates.sort(key=lambda p: str(p.relative_to(work)) in deferred)
     artifacts: List[Dict[str, Any]] = []
-    for path in sorted(work.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in candidates:
         rel = path.relative_to(work)
         if not rel.parts or rel.parts[0].startswith(".") or rel.parts[0] == "__pycache__":
             continue
@@ -298,6 +308,13 @@ def run_opencode(
             encoding="utf-8",
         )
         staging = _stage_conversation_files(work, input_file_ids)
+        # Fingerprint the uploads as staged, so a file the peer REWROTE can be told from one it
+        # only read. Excluding staged names unconditionally discarded the peer's own result
+        # whenever it edited an input in place -- and editing a file in place is the entire job
+        # of a coding agent. Worse here than in execute_code: this work dir is a mkdtemp deleted
+        # in the finally below, so there is no durable workspace to fall back on. See the same
+        # `pristine` reasoning in code_execution._execute.
+        staged_sigs = _sig_map(work, staging["staged"])
         try:
             os.chmod(work, 0o777)  # non-root container user must write here
         except OSError:
@@ -320,7 +337,11 @@ def run_opencode(
             error = f"{type(exc).__name__}: {exc}"
 
         answer = _clip(_strip_ansi(stdout).strip())
-        artifacts = _persist_artifacts(work, {_CONFIG_FILENAME, *staging["staged"]})
+        _now = _sig_map(work, staged_sigs)
+        pristine = {rel for rel, sig in staged_sigs.items()
+                    if _now.get(rel) == sig}                    # read but not written
+        artifacts = _persist_artifacts(work, {_CONFIG_FILENAME, *pristine},
+                                       defer={r for r in staged_sigs if r not in pristine})
         # No tools means no add_map_layer means nothing checked what this wrote. See
         # layer_qa.inspect_artifacts.
         from agent_runtime.layer_qa import inspect_artifacts

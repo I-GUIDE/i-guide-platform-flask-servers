@@ -78,7 +78,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent_runtime.code_execution import _clip, _host_user, _work_root
+from agent_runtime.code_execution import _clip, _host_user, _sig_map, _work_root
 from agent_runtime.opencode_peer import (
     CODE_PEER_ENV,
     _build_peer_prompt,
@@ -610,6 +610,12 @@ def run_claude(
     try:
         staging = _stage_conversation_files(work, input_file_ids)
         renamed = neutralize_instruction_files(work, staging["staged"])
+        # Baseline for the uploads, taken AFTER the rename so it covers the on-disk names.
+        # `already_persisted` below is signature-checked for exactly this reason -- "a file it
+        # edited SHOULD be sent again" -- but the staged half of the same expression was not,
+        # so a peer that cleaned an attached file in place had that result withheld.
+        staged_sigs = _sig_map(
+            work, set(staging["staged"]) | {f"uploaded_{n}" for n in renamed})
         try:
             os.chmod(work, 0o777)  # non-root container user must write here
         except OSError:
@@ -635,9 +641,12 @@ def run_claude(
 
         parsed = parse_cli_output(stdout)
         envelope = parsed["envelope"] or {}
-        excluded = (set(staging["staged"]) | {f"uploaded_{n}" for n in renamed}
-                    | already_persisted(work))
-        artifacts = _persist_artifacts(work, excluded)
+        _now = _sig_map(work, staged_sigs)
+        pristine = {rel for rel, sig in staged_sigs.items()
+                    if _now.get(rel) == sig}                    # read but not written
+        excluded = pristine | already_persisted(work)
+        artifacts = _persist_artifacts(work, excluded,
+                                       defer={r for r in staged_sigs if r not in pristine})
         if persistent:
             record_persisted(work, [a.get("path") for a in artifacts if a.get("path")])
         # The tool path runs these checks inside add_map_layer. This peer has none of the
