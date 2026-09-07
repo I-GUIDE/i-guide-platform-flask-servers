@@ -224,21 +224,96 @@ check rather than making it wrong — the map-denial check needs no catalog and 
 
 ## The tool surface
 
-36 tools in six families, plus `execute_code` and four file tools. Enumerate them from the
-factories rather than trusting a list — that is the only trustworthy inventory:
+Seventeen factories, 86 distinct tools on this checkout — and no peer binds them all. Enumerate
+rather than trusting a list: a hand-written one went stale here twice, and this is the same
+discovery path `capabilities.py` uses to answer "what can you do".
 
-`make_overlay_tools` · `make_aggregate_tools` · `make_temporal_tools` ·
-`make_langchain_geo_tools` · `make_rs_embed_tools` · `make_langchain_qgis_tools` ·
-`make_code_execution_tools` · `make_langchain_file_tools`
+```bash
+PYTHONPATH="$PWD" python3 -c "
+from agent_runtime.capabilities import _discover_registry_factories, _factory_kwargs
+for name, fn in _discover_registry_factories():
+    tools = fn(**_factory_kwargs(fn, session_id='probe'))
+    print(f'{name:32s} {len(tools):2d}  ' + ', '.join(t.name for t in tools))"
+```
 
-The analysis families load **only when files are attached** to the conversation
-(`default_analyze_fn` in `agent_runtime/supervisor/graph.py`), so a bare chat session has none
-of them. `rs_embed_tools` calls an external service at `RS_EMBED_URL` (default
-`http://localhost:8077` — inside a container that means the container itself, not the host).
+Most analysis families load **only when files are attached** to the conversation
+(`default_analyze_fn` in `agent_runtime/supervisor/graph.py`), but a bare session is not empty:
+rs-embed, its zonal pair, `admin_boundary`, `geocode_places` and `add_map_layer` are ungated on
+purpose — see **Adding a tool** for which gate applies where, and why. `rs_embed_tools` calls an
+external service at `RS_EMBED_URL` (default `http://localhost:8077` — inside a container that
+means the container itself, not the host).
 
 There is **no raster analysis**: no zonal statistics, band math, reclassify or terrain. Route
 that through `execute_code` (rasterio is available) or a GDAL algorithm via
 `qgis_processing_run`. The map client models vector layers only.
+
+## Adding a tool
+
+There is **no single tool registry**, so a tool is not added once. `collect_tools`
+(`agent_runtime/tool_policy.py:65`) serves the search peer alone; analyze and code each assemble
+their own list inline from fifteen independently imported factories, every one in its own
+`try/except` so a missing optional dependency costs that family rather than the whole turn.
+Nothing errors when a site is missed — the tool is simply absent from that peer and the model
+works around it. That is how two rounds of tool-description tuning went into `admin_boundary`
+while, on the peer being tuned, it did not exist.
+
+**The three registration sites:**
+
+- **analyze** — `default_analyze_fn`, `supervisor/graph.py:2963-3098`. The main analysis surface.
+- **code** — `default_code_fn`, `supervisor/graph.py:3290-3413`. A near-duplicate of the analyze
+  block, carrying skills and a two-tool KB slice in place of retrieval. The two are separate
+  literal lists; editing one does not touch the other.
+- **search** — `make_langchain_granular_tools` (`langchain_granular_tools.py:481`), which
+  `collect_tools` builds for `tool_strategy="granular"` and then tops up with MCP, quality and
+  skill tools. `admin_boundary`'s third registration is at `:650`.
+
+**The gate is the decision; the registration is typing.** Four things narrow what a peer binds:
+whether the conversation has uploads (`input_file_ids`), a tabular-only refinement that withholds
+the four tools needing a *vector* file when every upload is a spreadsheet
+(`_uploads_are_tabular_only` / `_VECTOR_FILE_TOOLS`, `graph.py:738-742`), the
+`enabled_search_methods` allowlist, and the `AGENT_CODE_EXEC` / `include_mcp_tools` flags.
+Measured on this checkout: analyze binds 29 tools with nothing attached and 63 with a vector
+upload.
+
+`if input_file_ids:` belongs on a tool that genuinely cannot run without an upload, and fewer
+qualify than it looks. `rs_embed` and its zonal pair, `admin_boundary`, `geocode_places` and
+`add_map_layer` all sit outside that gate on purpose, because each can start from a place name, a
+drawn region, or geometry the peer already holds. Every exception is commented at its site with
+the failure that put it there; the zonal one is the sharpest, since gating `embed_zones` on an
+upload hid the tool that consumes what `admin_boundary` had just produced.
+
+**Two things need no registration at all.** Capability introspection is dynamic:
+`_discover_registry_factories` (`capabilities.py:81`) globs `agent_runtime/*_tools.py` for
+`^make_.*tools$`, so a new `agent_runtime/<name>_tools.py` is introspectable for free — a factory
+living anywhere else is found only if its module is named in `_REGISTRY_EXTRA_MODULES`
+(`capabilities.py:77`), which is why `extractors.geo_handles` is listed there. And map delivery is
+structural rather than an allowlist: a result carrying a `map_layer` descriptor — or `map_layers`,
+the plural key for a call that draws more than one — crosses `build_map_layers`
+(`map_layers.py:150`) whatever the tool is called.
+
+**What does not announce itself.** Each of these is a separate literal, and each fails by
+omission rather than by error:
+
+- `_LEDGER_ARGS` / `_LEDGER_FACTS` / `_FACT_PHRASES` (`graph.py:291`, `:315`, `:645`). A tool
+  whose arguments and result keys appear on none of them lands a ledger row with no facts, so the
+  next turn cannot see what it produced — the failure the ledger exists to prevent.
+  `_FACT_PHRASES` is what renders `scale_m=10` as "10 m per pixel"; the raw field names are the
+  service's, and given only those the model answered that the evidence did not specify the
+  resolution. `_LEDGER_SEARCH_TOOLS` / `_LEDGER_SEARCH_RENAMES` (`:333`, `:339`) matter only if
+  the result's `source` and `count` mean search things rather than imagery things.
+- `_MAP_LAYER_TOOLS` (`graph.py:2675`) — documentation and a test invariant, deliberately NOT a
+  delivery signal: a tool name says nothing about whether the call succeeded. Ask
+  `_map_delivered_this_turn` (`:1383`) instead.
+- The name sets in `graph_state.py:26-93`, which `select_allowed_tools` (`tool_policy.py:26`)
+  filters an intent's tools against.
+- A capability statement in `prompts.py` — what the tool can do and what the route costs. Not a
+  mandate; see **Conventions that are deliberate**.
+- `docs/spatial-toolkit.html`, per `docs/README.md`.
+
+**Verify by enumeration, not by reading the diff.** The command under **The tool surface** lists
+what every factory actually returns, and `python3 -m pytest rag_pipeline/tests/ -q` covers the
+rest. A tool that imports cleanly and is bound nowhere looks identical, from the outside, to one
+that works.
 
 ## Why this workload is a poor fit for multiple agents
 
