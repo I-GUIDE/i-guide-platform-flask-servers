@@ -15,6 +15,7 @@ import {
   type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine,
 } from './agentClient';
 import { renderMarkdown } from './markdown';
+import type { AppTab } from './uiVariant';
 import {
   deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
   toStoredLayer, type SessionSummary, type StoredSession,
@@ -63,6 +64,7 @@ export default function App() {
   const [cfg, setCfg] = useState<AgentCfg>(init.cfg);
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
+  const [tab, setTab] = useState<AppTab>('chat');
   const [showSettings, setShowSettings] = useState(false);
   // Which models this agent will accept. Fetched once so the picker offers what is actually
   // served rather than a hardcoded list that drifts; null just means "agent default only".
@@ -584,7 +586,15 @@ export default function App() {
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}`}>
       <TopNav onToggleSettings={() => setShowSettings((s) => !s)}
         onToggleHistory={() => { setShowHistory((v) => !v); void listSessions().then(setSessions); }}
-        sessionCount={sessions.length} />
+        sessionCount={sessions.length}
+        tab={tab}
+        onSetTab={(t) => {
+          setTab(t);
+          // The remote-sensing tab is ABOUT the map: there is no drawing a region on a map
+          // that is not on screen, so opening the tab opens the map. Leaving it does not
+          // close the map again — by then the user may have put something on it.
+          if (t === 'rs') setMapVisible(true);
+        }} />
       {showHistory && (
         <div className="history" role="dialog" aria-label="Past conversations">
           <div className="history-head">
@@ -641,7 +651,7 @@ export default function App() {
           </div>
         )}
         <ChatPanel
-          messages={messages} busy={busy} hasRegion={!!drawnRegion} layers={layers}
+          messages={messages} busy={busy} tab={tab} hasRegion={!!drawnRegion} layers={layers}
           mapVisible={mapVisible} onToggleMap={() => setMapVisible((v) => !v)}
           models={models}
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}

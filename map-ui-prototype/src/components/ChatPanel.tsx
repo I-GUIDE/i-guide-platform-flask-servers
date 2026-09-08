@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { LayerArtifact } from '../contracts';
 import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
+import type { AppTab } from '../uiVariant';
 import { groupedSources, sourceHref, type SourceGroup } from '../answerFormat';
 
 export interface ChatMessage {
@@ -30,6 +31,7 @@ const RS_ACTIONS = [
 interface Props {
   messages: ChatMessage[];
   busy: boolean;
+  tab: AppTab;
   hasRegion: boolean;
   mapVisible: boolean;
   models: ModelCatalogue | null;
@@ -342,15 +344,6 @@ export function ChatPanel(p: Props) {
             {p.hasRegion && <button onClick={p.onClearRegion}>Clear region</button>}
             <span className={p.hasRegion ? 'rstat on' : 'rstat'}>{p.hasRegion ? '● region set' : '◇ spatial on'}</span>
           </div>
-          {p.hasRegion && (
-            <div className="rsrow" title="Run on the drawn region">
-              <span className="rslabel">🛰 satellite embedding</span>
-              {RS_ACTIONS.map((a) => (
-                <button key={a.label} className="rsbtn" disabled={p.busy}
-                  onClick={() => p.onSend(a.prompt)}>{a.label}</button>
-              ))}
-            </div>
-          )}
         </>
       )}
 
@@ -369,8 +362,41 @@ export function ChatPanel(p: Props) {
         {p.busy && !p.messages.some((m) => m.streaming) && <div className="turn"><div className="ai-label">I-GUIDE AI<span className="spin" /></div></div>}
       </div>
 
-      {p.messages.length <= 1 && (
+      {p.messages.length <= 1 && p.tab !== 'rs' && (
         <div className="suggest">{SUGGESTIONS.map((s) => <button key={s} className="chip" onClick={() => send(s)}>{s}</button>)}</div>
+      )}
+
+      {/* The satellite-embedding operations, directly above the composer — where the eye
+          already is when you go to type. Above the transcript they scrolled off the top of a
+          long conversation and were never seen again.
+
+          On the REMOTE SENSING tab they are always on screen, disabled until a region exists,
+          with the two steps spelled out: that tab exists to SHOW what can be done, and a
+          hidden control demonstrates nothing. Elsewhere they still appear only once a region
+          is drawn — a permanently greyed row is clutter in a tab that is not about them. */}
+      {p.spatial && (p.tab === 'rs' || p.hasRegion) && (
+        <div className={`rspanel ${p.tab === 'rs' ? 'demo' : ''}`}>
+          {p.tab === 'rs' && (
+            <ol className="rssteps">
+              <li className={p.hasRegion ? 'done' : ''}>
+                {p.mapVisible ? 'Right-drag on the map to draw a region'
+                              : 'Open the map, then right-drag to draw a region'}
+              </li>
+              <li className={p.hasRegion ? '' : 'muted'}>Pick an operation</li>
+            </ol>
+          )}
+          <div className="rsrow">
+            {/* The numbered steps above already say what this row is, and at a 460px panel the
+                label costs 126px — exactly enough to push the fourth operation onto a second
+                line. Kept where there are no steps to explain it. */}
+            {p.tab !== 'rs' && <span className="rslabel">🛰 satellite embedding</span>}
+            {RS_ACTIONS.map((a) => (
+              <button key={a.label} className="rsbtn" disabled={p.busy || !p.hasRegion}
+                title={p.hasRegion ? a.prompt : 'Draw a region on the map first'}
+                onClick={() => p.onSend(a.prompt)}>{a.label}</button>
+            ))}
+          </div>
+        </div>
       )}
 
       <div className="composer">

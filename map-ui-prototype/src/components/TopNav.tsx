@@ -1,12 +1,19 @@
 import { IGuideMark } from './IGuideMark';
 import { TopNavPlatform } from './TopNav.platform';
-import { isPlatformVariant } from '../uiVariant';
+import { isPlatformVariant, type AppTab } from '../uiVariant';
 
 export interface TopNavProps {
   onToggleSettings: () => void;
   onToggleHistory: () => void;
   sessionCount: number;
+  tab: AppTab;
+  onSetTab: (t: AppTab) => void;
 }
+
+const TABS: { id: AppTab; label: string; title: string }[] = [
+  { id: 'chat', label: 'Chat', title: 'Ask anything — the map opens when an answer needs it' },
+  { id: 'rs', label: 'Remote sensing', title: 'Draw a region and run satellite-embedding operations on it' },
+];
 
 // The header for the rs-embed deployment (issue #20). This used to mirror the I-GUIDE platform
 // chrome with non-functional placeholders — Collections / Apps / Support / a search box — which
@@ -28,6 +35,16 @@ function TopNavRsEmbed(p: TopNavProps) {
           </a>
           <span className="brand-name">I-GUIDE AI</span>
         </div>
+        {/* A demo surface, not a second app: the tabs choose what the page is SET UP for, and
+            the conversation carries across both. */}
+        <nav className="tabs" role="tablist" aria-label="Workspace">
+          {TABS.map((t) => (
+            <button key={t.id} role="tab" type="button" title={t.title}
+              aria-selected={p.tab === t.id}
+              className={`tab ${p.tab === t.id ? 'on' : ''}`}
+              onClick={() => p.onSetTab(t.id)}>{t.label}</button>
+          ))}
+        </nav>
         <div className="grow" />
         <button className="navbtn" title="Past conversations" onClick={p.onToggleHistory}>
           History{p.sessionCount ? ` (${p.sessionCount})` : ''}
