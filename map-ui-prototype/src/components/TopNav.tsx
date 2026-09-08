@@ -12,7 +12,7 @@ export interface TopNavProps {
 
 const TABS: { id: AppTab; label: string; title: string }[] = [
   { id: 'chat', label: 'Chat', title: 'Ask anything — the map opens when an answer needs it' },
-  { id: 'rs', label: 'Remote sensing', title: 'Draw a region and run satellite-embedding operations on it' },
+  { id: 'rs', label: 'RS-Embed Demo', title: 'Draw a region and run satellite-embedding operations on it' },
 ];
 
 // The header for the rs-embed deployment (issue #20). This used to mirror the I-GUIDE platform

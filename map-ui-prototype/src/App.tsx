@@ -93,7 +93,7 @@ export default function App() {
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
   const [tab, setTab] = useState<AppTab>('chat');
-  // Where the Remote sensing tab lands you. The demo is about this pair of cities, and a map
+  // Where the RS-Embed Demo tab lands you. The demo is about this pair of cities, and a map
   // opened over the whole country asks the visitor to go and find the subject first.
   const CHAMPAIGN_URBANA: [number, number, number, number] = [-88.32, 40.05, -88.14, 40.16];
   const [showSettings, setShowSettings] = useState(false);

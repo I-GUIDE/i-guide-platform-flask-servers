@@ -468,7 +468,7 @@ export function ChatPanel(p: Props) {
           already is when you go to type. Above the transcript they scrolled off the top of a
           long conversation and were never seen again.
 
-          On the REMOTE SENSING tab they are always on screen, disabled until a region exists,
+          On the RS-EMBED DEMO tab they are always on screen, disabled until a region exists,
           with the two steps spelled out: that tab exists to SHOW what can be done, and a
           hidden control demonstrates nothing. Elsewhere they still appear only once a region
           is drawn — a permanently greyed row is clutter in a tab that is not about them. */}
