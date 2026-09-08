@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type { Feature, FeatureCollection, Polygon, Geometry } from 'geojson';
 import { AgentMap } from './components/AgentMap';
 import { ChatPanel, type ChatMessage, type Mode, type AgentCfg } from './components/ChatPanel';
 import { TopNav } from './components/TopNav';
 import { LeftPanel, type SelectedFeature } from './components/LeftPanel';
+import { Splitter } from './components/Splitter';
 import type { LayerArtifact } from './contracts';
 import { parseIntent } from './agentBrain';
 import { searchKb, kbHitsToFeatureCollections, type KbHit } from './mockKb';
@@ -31,12 +33,27 @@ const DEFAULT_CFG: AgentCfg = {
 // is off so a pure-chat turn stays fast and never opens the map.
 const CHAT_ONLY_METHODS = ['keyword_search', 'semantic_search', 'neo4j_search', 'web_search', 'agent_kb_search', 'get_kb_block'];
 
-function loadCfg(): { mode: Mode; cfg: AgentCfg; spatial: boolean } {
+// The chat pane's width belongs to the user now. These are mirrored in styles.css as
+// --chat-min / --map-min so the stylesheet can re-clamp a restored width on its own, live, as
+// the window changes — change them in BOTH places.
+const CHAT_W_DEFAULT = 460;   // the width the remote-sensing row was tuned against
+const CHAT_W_MIN = 380;       // below this the composer's three 42px circles crowd the textarea out
+const MAP_W_MIN = 360;        // .leftpanel floats over the map and needs 312 (288 + gutters)
+
+function loadCfg(): { mode: Mode; cfg: AgentCfg; spatial: boolean; chatW: number } {
   try {
     const raw = localStorage.getItem('iguide-map-ui');
-    if (raw) { const j = JSON.parse(raw); return { mode: j.mode || 'live', cfg: { ...DEFAULT_CFG, ...j.cfg }, spatial: j.spatial !== false }; }
+    if (raw) { const j = JSON.parse(raw); return { mode: j.mode || 'live', cfg: { ...DEFAULT_CFG, ...j.cfg }, spatial: j.spatial !== false, chatW: readChatW(j.chatW) }; }
   } catch { /* */ }
-  return { mode: 'live', cfg: DEFAULT_CFG, spatial: true };
+  return { mode: 'live', cfg: DEFAULT_CFG, spatial: true, chatW: CHAT_W_DEFAULT };
+}
+// A stored width is not to be trusted: an older blob has no field at all, and JSON round-trips
+// NaN and Infinity to null. Only the FLOOR is enforced here — the ceiling depends on the window,
+// and styles.css applies that live in clamp(), so a width saved on a wide monitor cannot starve
+// the map on a laptop and the user's choice comes back when the room returns.
+function readChatW(v: unknown): number {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? Math.max(n, CHAT_W_MIN) : CHAT_W_DEFAULT;
 }
 
 function bboxPolygon(a: [number, number], b: [number, number]): Polygon {
@@ -46,8 +63,12 @@ function bboxPolygon(a: [number, number], b: [number, number]): Polygon {
 }
 function viewportPolygon(): Polygon | null {
   const m = (window as any).__map; if (!m) return null;
-  const b = m.getBounds();
-  return bboxPolygon([b.getWest(), b.getSouth()], [b.getEast(), b.getNorth()]);
+  // A handle can outlive its map — the pane is taken away by more than the Hide button now —
+  // and unlike applyFit this result is spliced straight into the prompt we send.
+  try {
+    const b = m.getBounds();
+    return bboxPolygon([b.getWest(), b.getSouth()], [b.getEast(), b.getNorth()]);
+  } catch { return null; }
 }
 function polygonBBox(poly: Polygon): [number, number, number, number] {
   const ring = poly.coordinates[0]; const lons = ring.map((c) => c[0]); const lats = ring.map((c) => c[1]);
@@ -55,13 +76,20 @@ function polygonBBox(poly: Polygon): [number, number, number, number] {
 }
 
 export default function App() {
-  const init = loadCfg();
+  // loadCfg reads localStorage and parses JSON. As a bare call in the body it did that on EVERY
+  // render, for values only the initial useState arguments ever read; lazily, it runs once.
+  const [init] = useState(loadCfg);
   const [layers, setLayers] = useState<LayerArtifact[]>([]);
   const [drawnRegion, setDrawnRegion] = useState<Polygon | null>(null);
   const [drawPreview, setDrawPreview] = useState<Feature | null>(null);
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<Mode>(init.mode);
   const [cfg, setCfg] = useState<AgentCfg>(init.cfg);
+  const [chatW, setChatW] = useState<number>(init.chatW);
+  // The drag class on .app — two renders per gesture, not one per frame.
+  const [resizing, setResizing] = useState(false);
+  // refitAfterResize is memoized with [] and reads its inputs from refs, so the drag flag is one too.
+  const resizingRef = useRef(false);
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
   const [tab, setTab] = useState<AppTab>('chat');
@@ -93,7 +121,11 @@ export default function App() {
   const layersRef = useRef(layers); layersRef.current = layers;
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => { try { localStorage.setItem('iguide-map-ui', JSON.stringify({ mode, cfg, spatial })); } catch { /* */ } }, [mode, cfg, spatial]);
+  // chatW changes once per gesture (release, key step, reset), never per frame, so it can ride
+  // the same single record as everything else. It has to be in BOTH the payload and the deps: in
+  // the payload alone it would only ever be flushed by an unrelated settings change, and a
+  // SEPARATE effect writing this key would clobber cfg — setItem replaces the whole object.
+  useEffect(() => { try { localStorage.setItem('iguide-map-ui', JSON.stringify({ mode, cfg, spatial, chatW })); } catch { /* */ } }, [mode, cfg, spatial, chatW]);
 
   // Progressive map: auto-reveal ONCE the first time a layer appears, then respect the
   // manual show/hide toggle (don't fight the user). Re-arm after layers are cleared.
@@ -156,6 +188,10 @@ export default function App() {
   // Re-apply the fit when the container resizes, but only right after we asked for it, so a
   // view the user has since panned or zoomed is never yanked back.
   const refitAfterResize = useCallback(() => {
+    // A splitter drag resizes the map on every frame. Re-framing per frame makes the map fight
+    // the pointer for the 2.5s after any fit — which is exactly when a user reaches for the
+    // seam, a layer having just landed. Hold off, and refit once on release instead.
+    if (resizingRef.current) return;
     const m = (window as any).__map;
     const last = lastFit.current;
     if (!m || !last || Date.now() - last.at > 2500) return;
@@ -586,7 +622,7 @@ export default function App() {
   }, [mode, asAgentConfig, putLayer, fitView, pushMsg]);
 
   return (
-    <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}`}>
+    <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}`}>
       <TopNav onToggleSettings={() => setShowSettings((s) => !s)}
         onToggleHistory={() => { setShowHistory((v) => !v); void listSessions().then(setSessions); }}
         sessionCount={sessions.length}
@@ -630,19 +666,22 @@ export default function App() {
           </ul>
         </div>
       )}
-      <div className="workspace">
-        {mapVisible && (
-          <LeftPanel
-            layers={layers} selected={selected}
-            onToggleLayer={toggleLayer} onRemoveLayer={removeLayerById}
-            onFitLayer={fitLayer} onSetOpacity={setLayerOpacity} onClearSelection={() => setSelected(null)}
-          />
-        )}
+      <div className="workspace" style={{ '--chat-w': `${chatW}px` } as CSSProperties}>
         {/* MOUNT the map only while it is shown. Hiding it with display:none left it mounted
             at ~40x30 and MapLibre never fired `load`: window.__map stayed unset and the
             canvas painted nothing (observed 400x300 inside an 820x646 container). */}
         {mapVisible && (
-          <div className="mapwrap" ref={mapBoxRef}>
+          <div className="mapwrap" id="mapwrap" ref={mapBoxRef}>
+            {/* The layer manager floats over the MAP, so it has to be positioned against the map
+                pane. As a sibling of .mapwrap its containing block was .workspace — the full
+                width of BOTH panes — so a narrow map pushed it across the seam and over the
+                transcript, where its z-index 5 beats a static .chat. .mapwrap is already
+                position:relative, so this costs no CSS. */}
+            <LeftPanel
+              layers={layers} selected={selected}
+              onToggleLayer={toggleLayer} onRemoveLayer={removeLayerById}
+              onFitLayer={fitLayer} onSetOpacity={setLayerOpacity} onClearSelection={() => setSelected(null)}
+            />
             {mapBoxReady && (
               <AgentMap
                 layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview}
@@ -658,6 +697,29 @@ export default function App() {
               />
             )}
           </div>
+        )}
+        {/* Only while there are two panes to divide. In chat-only the chat is a centred reading
+            column, and a handle beside it is dead chrome that would also shift the `margin:0 auto`
+            centring by half its width. */}
+        {mapVisible && (
+          <Splitter
+            chatMin={CHAT_W_MIN} mapMin={MAP_W_MIN} defaultWidth={CHAT_W_DEFAULT}
+            onResizeStart={() => { resizingRef.current = true; setResizing(true); }}
+            onResizeEnd={(px) => {
+              resizingRef.current = false;
+              setResizing(false);
+              setChatW(px);
+              // One settle pass, once the browser has laid the new width out. The per-frame refit
+              // was suppressed above; and a fitBounds still easing when the drag began was framed
+              // for the pre-drag width — MapLibre skips its own stop() for the whole 800ms of an
+              // ease, so nothing else would ever correct it.
+              requestAnimationFrame(() => {
+                const m = (window as any).__map;
+                if (m) { try { m.resize(); } catch { /* */ } }
+                refitAfterResize();
+              });
+            }}
+          />
         )}
         <ChatPanel
           messages={messages} busy={busy} tab={tab} hasRegion={!!drawnRegion} layers={layers}

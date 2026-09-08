@@ -9,13 +9,66 @@ html, body, #root { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--ink); font: 15px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
 a { color: var(--link); }
 
-/* layout: top nav + workspace (left panel + map + chat), progressive */
-.app { display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden; }
+/* layout: top nav + workspace (left panel + map + chat), progressive.
+   The map/chat split is the user's: the seam is a real control (.splitter below) and the chat
+   width rides on --chat-w, published by App on .workspace. The two floors are mirrored as
+   constants in App.tsx — change them in BOTH places.
+     --chat-min  the composer's three 42px circles plus its padding leave the textarea almost
+                 nothing below this, and the remote-sensing row starts wrapping.
+     --map-min   .leftpanel floats over the map at left:12px and is 288px wide, so 312 is the
+                 hard floor. Neither floor may be reached by a drag, and neither may be reached
+                 by a width restored from a wider window: a map pane at 0 does not collapse,
+                 it UNMOUNTS, and the camera goes with it. */
+.app { display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden;
+  --chat-min: 380px; --map-min: 360px; --split-w: 8px; }
 .workspace { flex: 1; display: flex; min-height: 0; position: relative; }
-.mapwrap { flex: 1; position: relative; min-width: 0; }
+.mapwrap { flex: 1; position: relative; min-width: var(--map-min); }
 .app.chat-only .mapwrap { display: none; }
 .chat { height: 100%; width: 460px; flex: none; background: var(--bg); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
 .app.chat-only .chat { flex: 1; width: auto; max-width: 900px; margin: 0 auto; border-left: none; }
+/* clamp() is the safety net the drag arithmetic cannot be: 100% resolves against .workspace, so
+   the ceiling follows the window live — a width saved on a wide monitor, a half-screened window,
+   a browser-zoom change and a docked devtools panel are all handled here rather than by a
+   listener, and the user's chosen width comes back untouched when the room returns.
+   The splitter draws the seam now, so the pane does not draw a second line beside it. */
+.app.map-on .chat {
+  width: clamp(var(--chat-min), var(--chat-w, 460px), calc(100% - var(--map-min) - var(--split-w)));
+  border-left: none;
+}
+
+/* ---- the map/chat seam -------------------------------------------------------------------
+   A control, not a border: 8px of flex item with a ::before widening the grab band to ~16px,
+   while the visible line stays the 1px the chat's border-left used to draw. A flex ITEM and not
+   an overlay, so it shrinks the map's box instead of covering the OSM attribution the basemap's
+   terms require. z-index above .leftpanel's 5 so the handle stays clickable with the map at its
+   minimum, and below .history's 30. */
+.splitter { flex: 0 0 var(--split-w); position: relative; z-index: 6; background: transparent;
+  cursor: col-resize; user-select: none; -webkit-user-select: none;
+  /* React registers touchmove passively at the root, so preventDefault in a touch handler is a
+     no-op and the browser would claim the gesture and fire pointercancel. CSS wins regardless. */
+  touch-action: none; }
+.splitter::before { content: ''; position: absolute; inset-block: 0; inset-inline: -4px; }
+.splitter::after { content: ''; position: absolute; inset-block: 0; left: 50%; width: 1px;
+  margin-left: -.5px; background: var(--line); }
+.splitter:hover::after, .splitter:active::after { width: 3px; margin-left: -1.5px; background: var(--brand); }
+/* Outline, not box-shadow, so the focus ring survives forced colors. Pulled inward because a
+   +2px ring on an 8px bar reads as a blob over the canvas. */
+.splitter:focus-visible { outline: 2px solid var(--brand); outline-offset: -1px; }
+.splitter:focus-visible::after { background: var(--brand); width: 3px; margin-left: -1.5px; }
+/* A background-only affordance disappears in High Contrast — for the readers most likely to
+   want a wider chat. There is no width transition anywhere: it would lag the pointer and
+   multiply the map's resize churn, so there is nothing here for prefers-reduced-motion. */
+@media (forced-colors: active) {
+  .splitter::after { background: CanvasText; forced-color-adjust: none; }
+}
+
+/* While the seam is being dragged the whole window is one gesture: the map's cursor="grab"
+   would otherwise flicker through the moment the pointer crossed the canvas, and the drag would
+   paint a selection across the transcript. pointer-events:none on the map also keeps deck.gl's
+   per-move picking pass off the frame budget — safe, because the pointer is captured by the
+   handle, not by the canvas. */
+.app.resizing, .app.resizing * { cursor: col-resize !important; user-select: none !important; -webkit-user-select: none !important; }
+.app.resizing .mapwrap { pointer-events: none; }
 
 /* top nav bar (reference chrome; nav items are placeholders) */
 .bar { padding: 12px 16px 6px; }
@@ -106,10 +159,13 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 
 /* settings */
 .settings { margin: 4px 18px 6px; background: #fff; border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 12px 14px; }
-.settings .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+/* 1fr is minmax(auto, 1fr), and a <select>'s auto floor is its widest option — the model
+   picker's runtime optgroup labels already floored this panel past 460px. minmax(0,1fr) plus a
+   min-width on the controls lets the columns actually shrink with the pane. */
+.settings .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
 .settings label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
 .settings label.wide { grid-column: 1 / -1; }
-.settings input, .settings select { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px; color: var(--ink); background: #fff; }
+.settings input, .settings select { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px; color: var(--ink); background: #fff; min-width: 0; width: 100%; }
 .settings .chk { flex-direction: row; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: #5b6168; }
 .settings .chk input { width: 15px; height: 15px; }
 
@@ -179,6 +235,10 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .files a { display: inline-flex; align-items: center; gap: 7px; background: #eef6f0; border: 1px solid #d6e7db; color: var(--link); text-decoration: none; border-radius: 10px; padding: 7px 12px; font-size: 13px; }
 .files a:hover { background: #e4f0e8; }
+/* Underscore-joined filenames and long inline code have no break opportunity, so they punch out
+   of the pane and get clipped. Only routine now that the pane can be narrowed. */
+.files a { overflow-wrap: anywhere; }
+.md code { overflow-wrap: anywhere; }
 
 /* map-layer pills */
 .mlayers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
@@ -218,7 +278,9 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 /* composer */
 .composer { padding: 8px 18px 12px; }
 .box { display: flex; align-items: flex-end; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: 26px; box-shadow: var(--shadow); padding: 8px; }
-.box textarea { flex: 1; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; line-height: 1.5; max-height: 160px; height: 40px; padding: 8px 6px; background: transparent; color: var(--ink); }
+/* Without min-width:0 the textarea's automatic minimum is its cols-derived width (~180px),
+   which put the composer's real floor above the pane's. */
+.box textarea { flex: 1; min-width: 0; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; line-height: 1.5; max-height: 160px; height: 40px; padding: 8px 6px; background: transparent; color: var(--ink); }
 .circle { width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--line); background: #fff; color: #5b6168; display: grid; place-items: center; cursor: pointer; flex: 0 0 auto; padding: 0; box-shadow: none; }
 .circle:hover:not(:disabled) { background: var(--soft); }
 .circle.send { background: var(--brand); border-color: var(--brand); color: #fff; }
@@ -328,3 +390,14 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 /* The staged operation, and the hint that the composed question is editable. */
 .rsbtn.on { background: #f6b93b; border-color: #c98a1a; color: #3d2a02; }
 .rsbtn.on:hover:not(:disabled) { background: #f2ad20; }
+
+/* Two panes need 380 + 8 + 360 = 748px of workspace. Below that the chat cannot shrink
+   (flex:none), so the composer would be clipped by .app{overflow:hidden} with no scrollbar and
+   no way to reach the send button. Fall back to the single-pane reading column the app already
+   has, and ignore the stored width entirely. Equal specificity to .app.map-on .chat above, so
+   this has to stay last in the file to win. The map instance goes with the pane, which is only
+   safe because AgentMap now clears window.__map on unmount. */
+@media (max-width: 760px) {
+  .app.map-on .mapwrap, .app.map-on .splitter { display: none; }
+  .app.map-on .chat { flex: 1; width: auto; max-width: 900px; margin: 0 auto; }
+}

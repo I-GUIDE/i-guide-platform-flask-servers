@@ -251,6 +251,24 @@ export function ChatPanel(p: Props) {
     el.scrollTop = el.scrollHeight;
   }, [p.messages, p.busy]);
 
+  // The pane's width is the user's now, and a narrower chat re-wraps every paragraph taller
+  // while the browser holds scrollTop: a transcript that was following new content silently ends
+  // up short of the bottom, and only a scroll back down re-attaches it. Re-assert the follow when
+  // the WIDTH changes — height changes are the stream's business, handled above — and only when
+  // it was already following, so a reader who scrolled up is never yanked down.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let w = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === w) return;
+      w = el.clientWidth;
+      if (pinnedRef.current) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const send = (t: string) => {
     const v = t.trim();
     if (!v || p.busy) return;

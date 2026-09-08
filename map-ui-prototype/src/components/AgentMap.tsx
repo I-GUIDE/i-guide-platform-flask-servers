@@ -120,28 +120,50 @@ export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover
       boundRef.current = null;
     };
   }, []);
-  useEffect(() => () => { unbindRef.current?.(); unbindRef.current = null; }, []);
+  useEffect(() => () => {
+    const bound = boundRef.current;
+    unbindRef.current?.(); unbindRef.current = null;
+    // The instance goes with this component — react-map-gl calls map.remove(). App clears the
+    // handle when the map is HIDDEN, but the pane can also be taken away underneath us (a window
+    // narrowed past the two-pane minimum), and a stale handle is worse than none: fitView sees a
+    // truthy map, skips arming pendingFit, and the next delivered layer is never framed —
+    // invisibly, because applyFit's catch reads the throw as a degenerate bbox.
+    if (bound && (window as any).__map === bound) (window as any).__map = undefined;
+  }, []);
 
   // The map is mounted while hidden (progressive reveal), so its canvas is sized for a
   // zero/40x30 box and stays that way: observed 400x300 inside an 820x646 container, painting
   // nothing. A one-shot resize on reveal races the layout, so track the container instead.
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapRef | null>(null);
+  const roRaf = useRef(0);
   useEffect(() => {
     const el = wrapRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(() => {
-      const m = (window as any).__map;
-      if (m && el.clientWidth > 0) {
-        try { m.resize(); } catch { /* */ }
-        // Resizing keeps the CENTER but not the framing: a fit computed against the
-        // pre-reveal box stays over-zoomed after the canvas grows, so let the owner
-        // re-apply it now that the container is its real size.
-        onResize?.();
-      }
+      // MapLibre already observes this same container on its own 50ms throttle, so what this
+      // callback is really for is the onResize NOTIFICATION. Coalesce it to one frame: a
+      // splitter drag fires the observer at pointer rate, and each resize() reallocates the
+      // WebGL drawing buffer — costlier here because preserveDrawingBuffer is on.
+      if (roRaf.current) return;
+      roRaf.current = requestAnimationFrame(() => {
+        roRaf.current = 0;
+        const m = (window as any).__map;
+        if (m && el.clientWidth > 0) {
+          try { m.resize(); } catch { /* */ }
+          // Resizing keeps the CENTER but not the framing: a fit computed against the
+          // pre-reveal box stays over-zoomed after the canvas grows, so let the owner
+          // re-apply it now that the container is its real size.
+          onResize?.();
+        }
+      });
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      if (roRaf.current) cancelAnimationFrame(roRaf.current);
+      roRaf.current = 0;
+    };
   }, [onResize]);
 
   const deckLayers = useMemo(
