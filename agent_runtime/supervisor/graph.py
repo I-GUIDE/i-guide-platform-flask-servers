@@ -982,12 +982,28 @@ def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
     lines = _ledger_lines(rows)
     if not lines:
         return None
-    return (f"{_LEDGER_HEADING}:\n"
-            "These are facts about work already done — if the user is asking about it, answer "
-            "from here rather than saying the information is unavailable, and do not re-derive "
-            "it. A line marked FAILED records a tool that did NOT work: that work was never "
-            "done, its result does not exist, and re-running it may be the right move — never "
-            "describe it as completed.\n" + "\n".join(lines) + _visible_state_note(rows))
+    preamble = (f"{_LEDGER_HEADING}:\n"
+                "These are facts about work already done — if the user is asking about it, answer "
+                "from here rather than saying the information is unavailable, and do not re-derive "
+                "it. A line marked FAILED records a tool that did NOT work: that work was never "
+                "done, its result does not exist, and re-running it may be the right move — never "
+                "describe it as completed.\n")
+    # _LEDGER_MAX_CHARS is documented as "a hard ceiling on the rendered ledger", and it exists
+    # BECAUSE a turn overflowed the context window — so it must not be able to cause that
+    # itself. _ledger_lines honours it, but the visible-state section was appended afterwards
+    # from the FULL row list, outside the budget, so the note this function returns could run
+    # past the ceiling however tightly the lines were trimmed. Both halves are inside it now,
+    # and the visible-state section is trimmed rather than dropped: telling the answerer what is
+    # on the user's screen is the thing it was added for.
+    body = "\n".join(lines)
+    visible = _visible_state_note(rows)
+    room = _LEDGER_MAX_CHARS - len(body)
+    if visible and len(visible) > room:
+        marker = " …"
+        visible = visible[:max(0, room - len(marker))].rstrip()
+        if visible:
+            visible += marker
+    return preamble + body + visible
 
 
 def _visible_state_note(rows: List[Dict[str, Any]]) -> str:
@@ -2846,7 +2862,7 @@ _TOOL_FAIL_REPEATS = 2
 def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
     """``{tool_name: error}`` for tools that returned ok=false at least _TOOL_FAIL_REPEATS times."""
     counts: Dict[str, int] = {}
-    errors: Dict[str, str] = {}
+    seen: Dict[str, List[str]] = {}
     for item in artifacts.get("tool_results") or []:
         if not isinstance(item, dict):
             continue
@@ -2860,8 +2876,27 @@ def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
             parsed = None
         if isinstance(parsed, dict) and parsed.get("ok") is False:
             counts[name] = counts.get(name, 0) + 1
-            errors.setdefault(name, str(parsed.get("error") or "")[:300])
-    return {n: errors.get(n, "") for n, c in counts.items() if c >= _TOOL_FAIL_REPEATS}
+            seen.setdefault(name, []).append(str(parsed.get("error") or "")[:300])
+
+    # The LATEST error, and a note when the failures were not the same one.
+    #
+    # This kept the FIRST error while only counting occurrences, so a peer that fixed
+    # ModuleNotFoundError and then hit a KeyError was handed back the ModuleNotFoundError as
+    # the thing failing repeatedly — and sent off to re-fix a problem it had already solved.
+    # Two DIFFERENT errors are also the run/read/fix loop working rather than a dead end, so
+    # the observation has to say which it is instead of flattening both into one string.
+    out: Dict[str, str] = {}
+    for name, count in counts.items():
+        if count < _TOOL_FAIL_REPEATS:
+            continue
+        history = seen.get(name) or [""]
+        latest = history[-1]
+        distinct = list(dict.fromkeys(e for e in history if e))
+        if len(distinct) > 1:
+            latest = (f"{latest} (this tool failed {count} times with "
+                      f"{len(distinct)} different errors; this is the most recent)")
+        out[name] = latest
+    return out
 
 
 def _tool_stuck_observation(failures: Dict[str, str]) -> str:
@@ -3758,6 +3793,28 @@ def _compose_insufficiency_reply(llm: Optional[Any], query: str) -> str:
         return ""
 
 
+def _execution_note(result: Any) -> str:
+    """One line stating whether the code in a peer result actually RAN.
+
+    The flag exists so synthesis cannot describe a failed run as a working one, and it was left
+    to SURVIVE a serialization rather than being stated. It did not. In analysis_results it sits
+    after tool_calls/tool_results — the two biggest fields — and `json.dumps(...)[:2000]` cut it
+    off. For the code peer it was never serialized at all: that branch prefers the peer's
+    `answer` text and never dumps the dict. So the field that justified the whole
+    execution-honesty series reached the answering model through neither path.
+
+    Stated, not smuggled.
+    """
+    if not isinstance(result, dict) or "executed" not in result:
+        return ""
+    if result.get("executed"):
+        return "EXECUTION: the code in this result RAN and its output is real."
+    error = str(result.get("execution_error") or "").strip()
+    tail = f" The failure was: {error[:200]}" if error else ""
+    return ("EXECUTION: the code in this result did NOT run." + tail
+            + " Do not present it as executed, and do not describe its output as a result.")
+
+
 def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
     """Compose the final grounded answer in the original AnalysisAgent format."""
 
@@ -3785,6 +3842,9 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
         parts.append(f"Evidence:\n{_format_documents(evidence)}")
         if analysis_results:
             parts.append(f"Analysis results:\n{json.dumps(analysis_results, ensure_ascii=True, default=str)[:2000]}")
+            _note = _execution_note(analysis_results)
+            if _note:
+                parts.append(_note)
         if code_result:
             # Prefer the code peer's human-readable answer; only fall back to a
             # serialized dump if no answer text is present (keeps the real code /
@@ -3793,6 +3853,9 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
                 parts.append(f"Code result:\n{str(code_result['answer'])[:2000]}")
             else:
                 parts.append(f"Code result:\n{json.dumps(code_result, ensure_ascii=True, default=str)[:2000]}")
+            _note = _execution_note(code_result)
+            if _note:
+                parts.append(_note)
         prompt = "\n\n".join(parts)
         if hasattr(active, "invoke"):
             return _content_to_text(active.invoke(prompt))

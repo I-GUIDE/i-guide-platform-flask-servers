@@ -369,3 +369,66 @@ def test_the_analyze_call_site_asks_for_the_stricter_reading():
     import inspect
     src = inspect.getsource(g.default_analyze_fn)
     assert "any_fence=False" in src
+
+
+# --- 6. the flag has to REACH the answerer -------------------------------------------------
+#
+# `executed` exists so synthesis cannot describe a failed run as a working one, and it was left
+# to survive a serialization instead of being stated. It did not: in analysis_results it sits
+# after tool_calls/tool_results and json.dumps(...)[:2000] cuts it, and for the code peer the
+# normal branch sends only `answer` and never dumps the dict at all.
+
+def _synthesis_prompt(analysis=None, code=None):
+    seen = {}
+    fn = g.default_synthesize_fn(llm=lambda prompt: seen.setdefault("p", prompt) or "answer")
+    fn("q", [], analysis, code, [])
+    return seen["p"]
+
+
+def test_a_failed_analysis_run_is_stated_not_buried():
+    """The flag itself is genuinely truncated away — the note is what has to arrive."""
+    big = {"summary": "s", "tool_calls": [{"x": "y" * 400}],
+           "tool_results": [{"c": "z" * 1600}],
+           "executed": False, "execution_error": "ModuleNotFoundError: pysal"}
+    prompt = _synthesis_prompt(analysis=big)
+    assert "did NOT run" in prompt
+    assert "pysal" in prompt
+
+
+def test_a_failed_code_run_is_stated_even_though_only_the_answer_is_sent():
+    prompt = _synthesis_prompt(code={
+        "answer": "Here is the loader:\n```python\nimport requests\n```",
+        "executed": False, "execution_error": "no network in the sandbox"})
+    assert "did NOT run" in prompt
+    assert "no network in the sandbox" in prompt
+
+
+def test_a_successful_run_says_so():
+    prompt = _synthesis_prompt(code={"answer": "counts are 1204 and 873", "executed": True})
+    assert "RAN" in prompt
+    assert "did NOT run" not in prompt
+
+
+def test_a_result_with_no_execution_claim_gets_no_note():
+    """Search-only turns must not gain a sentence about code."""
+    prompt = _synthesis_prompt(analysis={"summary": "no code here"})
+    assert "EXECUTION:" not in prompt
+
+
+# --- 7. two failures are not automatically the SAME failure --------------------------------
+
+def test_the_latest_error_is_reported_not_the_first():
+    """Handing back an error the peer already fixed sends it to re-fix a solved problem."""
+    arts = {"tool_results": [
+        _exec_result(False, "ModuleNotFoundError: pysal", 1),
+        _exec_result(False, "KeyError: 'GEOID'", 1)]}
+    err = g._repeatedly_failed_tools(arts)["execute_code"]
+    assert "GEOID" in err, err
+    assert "2 different errors" in err, "the peer is not told the failures differed"
+
+
+def test_identical_failures_are_reported_plainly():
+    arts = {"tool_results": [
+        _exec_result(False, "ModuleNotFoundError: pysal", 1),
+        _exec_result(False, "ModuleNotFoundError: pysal", 1)]}
+    assert g._repeatedly_failed_tools(arts)["execute_code"] == "ModuleNotFoundError: pysal"
