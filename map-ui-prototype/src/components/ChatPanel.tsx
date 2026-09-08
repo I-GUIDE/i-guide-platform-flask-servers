@@ -21,11 +21,52 @@ export interface AgentCfg { endpoint: string; uploadEndpoint: string; apiKey: st
                             model?: string; provider?: string; reasoningEffort?: string;
                             codePeer?: string; codePeerModel?: string; orchestration?: string }
 
-const RS_ACTIONS = [
-  { label: 'Embed',   prompt: 'Embed this drawn region with the gse model for June–September 2022 and put the embedding on the map.' },
-  { label: 'Segment', prompt: 'Segment this drawn region into 6 look-alike zones from its satellite embedding and show it on the map.' },
-  { label: 'Change',  prompt: 'How much did this drawn region change across 2018, 2020, 2022 and 2024 according to its satellite embeddings?' },
-  { label: 'Predict', prompt: 'Run the available pretrained heads on this drawn region and report the predictions with their validation scores.' },
+// The satellite-embedding models the service actually offers, grouped the way the choice
+// matters: a precomputed model answers in seconds, an on-the-fly one runs the encoder. Six of
+// the twenty, chosen to be worth demonstrating rather than exhaustive — "Which satellite
+// embedding models can I use?" asks the agent for the full list, live.
+const RS_MODELS: { group: string; ids: string[] }[] = [
+  { group: 'Precomputed — answers in seconds', ids: ['gse', 'copernicus', 'tessera'] },
+  { group: 'On the fly — runs the encoder', ids: ['clay', 'prithvi', 'terramind'] },
+];
+
+const RS_YEARS = ['2024', '2023', '2022', '2021', '2020', '2019', '2018'];
+
+// Written as the phrase that goes INTO the question, so the composed prompt reads like some-
+// thing a person would type rather than a form serialised into a sentence.
+const RS_SEASONS: { id: string; label: string; phrase: (y: string) => string }[] = [
+  { id: 'summer', label: 'Jun–Sep',    phrase: (y) => `June–September ${y}` },
+  { id: 'spring', label: 'Mar–May',    phrase: (y) => `March–May ${y}` },
+  { id: 'autumn', label: 'Sep–Nov',    phrase: (y) => `September–November ${y}` },
+  { id: 'year',   label: 'whole year', phrase: (y) => `the whole of ${y}` },
+];
+
+// The four operations, composed from the current model and period rather than frozen. The
+// point of the demo is that these ARE parameters — a fixed "gse, June–September 2022" shows
+// one cell of the space and hides that the rest exists.
+function rsActions(model: string, year: string, season: string) {
+  const when = (RS_SEASONS.find((s) => s.id === season) || RS_SEASONS[0]).phrase(year);
+  const earlier = String(Math.max(2017, Number(year) - 4));
+  const middle = String(Math.max(2017, Number(year) - 2));
+  return [
+    { label: 'Embed',
+      prompt: `Embed this drawn region with the ${model} model for ${when} and put the embedding on the map.` },
+    { label: 'Segment',
+      prompt: `Segment this drawn region into 6 look-alike zones from its ${model} satellite embedding for ${when}, and show it on the map.` },
+    { label: 'Change',
+      prompt: `How much did this drawn region change across ${earlier}, ${middle} and ${year} according to its ${model} satellite embeddings?` },
+    { label: 'Predict',
+      prompt: `Run the available pretrained heads on this drawn region using ${model} embeddings for ${when}, and report the predictions with their validation scores.` },
+  ];
+}
+
+// Starter questions for the remote-sensing tab. None of these needs a region drawn first — a
+// starter that fails until you have done something else teaches the wrong thing about the tab.
+const RS_SUGGESTIONS = [
+  'Which satellite embedding models can I use?',
+  'Embed Urbana, Illinois with the GSE model',
+  'What can you do with satellite embeddings?',
+  'Compare Champaign and Urbana on a shared PCA basis',
 ];
 
 interface Props {
@@ -132,6 +173,9 @@ const BOTTOM_SLACK_PX = 32;
 
 export function ChatPanel(p: Props) {
   const [text, setText] = useState('');
+  const [rsModel, setRsModel] = useState('gse');
+  const [rsYear, setRsYear] = useState('2022');
+  const [rsSeason, setRsSeason] = useState('summer');
   const scrollRef = useRef<HTMLDivElement>(null);
   // Whether the transcript is FOLLOWING new content. True while the reader is at the bottom,
   // false once they scroll up to read something. A ref, not state: it changes on every scroll
@@ -364,8 +408,12 @@ export function ChatPanel(p: Props) {
         {p.busy && !p.messages.some((m) => m.streaming) && <div className="turn"><div className="ai-label">I-GUIDE AI<span className="spin" /></div></div>}
       </div>
 
-      {p.messages.length <= 1 && p.tab !== 'rs' && (
-        <div className="suggest">{SUGGESTIONS.map((s) => <button key={s} className="chip" onClick={() => send(s)}>{s}</button>)}</div>
+      {p.messages.length <= 1 && (
+        <div className="suggest">
+          {(p.tab === 'rs' ? RS_SUGGESTIONS : SUGGESTIONS).map((s) => (
+            <button key={s} className="chip" onClick={() => send(s)}>{s}</button>
+          ))}
+        </div>
       )}
 
       {/* The satellite-embedding operations, directly above the composer — where the eye
@@ -387,14 +435,40 @@ export function ChatPanel(p: Props) {
               <li className={p.hasRegion ? '' : 'muted'}>Pick an operation</li>
             </ol>
           )}
+          {/* What the operations are composed FROM. On the demo tab only: in the chat tab the
+              row is a small contextual offer once a region exists, and three selects would
+              outweigh it. There it uses these same defaults. */}
+          {p.tab === 'rs' && (
+            <div className="rsopts">
+              <label>model
+                <select value={rsModel} onChange={(e) => setRsModel(e.target.value)}>
+                  {RS_MODELS.map((g) => (
+                    <optgroup key={g.group} label={g.group}>
+                      {g.ids.map((id) => <option key={id} value={id}>{id}</option>)}
+                    </optgroup>
+                  ))}
+                </select>
+              </label>
+              <label>year
+                <select value={rsYear} onChange={(e) => setRsYear(e.target.value)}>
+                  {RS_YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+                </select>
+              </label>
+              <label>months
+                <select value={rsSeason} onChange={(e) => setRsSeason(e.target.value)}>
+                  {RS_SEASONS.map((sn) => <option key={sn.id} value={sn.id}>{sn.label}</option>)}
+                </select>
+              </label>
+            </div>
+          )}
           <div className="rsrow">
             {/* The numbered steps above already say what this row is, and at a 460px panel the
                 label costs 126px — exactly enough to push the fourth operation onto a second
                 line. Kept where there are no steps to explain it. */}
             {p.tab !== 'rs' && <span className="rslabel">🛰 satellite embedding</span>}
-            {RS_ACTIONS.map((a) => (
+            {rsActions(rsModel, rsYear, rsSeason).map((a) => (
               <button key={a.label} className="rsbtn" disabled={p.busy || !p.hasRegion}
-                title={p.hasRegion ? a.prompt : 'Draw a region on the map first'}
+                title={p.hasRegion ? a.prompt : `Draw a region on the map first — then: ${a.prompt}`}
                 onClick={() => p.onSend(a.prompt)}>{a.label}</button>
             ))}
           </div>

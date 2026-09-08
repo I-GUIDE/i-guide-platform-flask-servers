@@ -74,7 +74,7 @@ export default function App() {
   const [models, setModels] = useState<ModelCatalogue | null>(null);
   const [selected, setSelected] = useState<SelectedFeature | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'agent', text: "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata; the map opens on its own when I return geometry, or hit Map — then right-drag on it to select a region." },
+    { role: 'agent', text: "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata; the map opens on its own when I return geometry, or hit Map — then right-click or right-drag on it to select a region." },
   ]);
 
   const threadRef = useRef<string>(newThreadId());

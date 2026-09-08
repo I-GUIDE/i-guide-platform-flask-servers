@@ -316,3 +316,11 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .rsbtn:hover:not(:disabled) { background: #fdeccb; border-color: #c98a1a; }
 .rsbtn:disabled { opacity: .45; cursor: not-allowed; }
 .rsbtn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* ---- what the operations are composed from ---------------------------------------------- */
+.rsopts { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 0 0 9px; }
+.rsopts label { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+                color: #6b7280; text-transform: lowercase; }
+.rsopts select { font-size: 12px; padding: 3px 6px; border: 1px solid var(--line);
+                 border-radius: 7px; background: #fff; color: var(--ink); max-width: 130px; }
+.rsopts select:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
