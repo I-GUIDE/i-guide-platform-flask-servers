@@ -337,13 +337,15 @@ export function ChatPanel(p: Props) {
 
       {p.spatial && (
         <>
-          <div className="toolbar">
-            {p.mapVisible && <span className="hint">right-drag the map to select a region</span>}
-            {/* Shown only when there IS a region: a permanently greyed-out button is just
-                clutter — the toolbar should offer what can actually be done right now. */}
-            {p.hasRegion && <button onClick={p.onClearRegion}>Clear region</button>}
-            <span className={p.hasRegion ? 'rstat on' : 'rstat'}>{p.hasRegion ? '● region set' : '◇ spatial on'}</span>
-          </div>
+          {/* Only the control that DOES something. The hint that used to sit here repeated
+              what the greeting and the numbered steps already say, and "◇ spatial on" reported
+              a setting rather than offering an action — two lines of chrome above every
+              conversation to say nothing new. An empty bar is not rendered at all. */}
+          {p.hasRegion && (
+            <div className="toolbar">
+              <button onClick={p.onClearRegion}>Clear region</button>
+            </div>
+          )}
         </>
       )}
 
@@ -379,8 +381,8 @@ export function ChatPanel(p: Props) {
           {p.tab === 'rs' && (
             <ol className="rssteps">
               <li className={p.hasRegion ? 'done' : ''}>
-                {p.mapVisible ? 'Right-drag on the map to draw a region'
-                              : 'Open the map, then right-drag to draw a region'}
+                {p.mapVisible ? 'Right-click or right-drag on the map to draw a region'
+                              : 'Open the map, then right-click or right-drag to draw a region'}
               </li>
               <li className={p.hasRegion ? '' : 'muted'}>Pick an operation</li>
             </ol>
@@ -405,7 +407,8 @@ export function ChatPanel(p: Props) {
               for while composing, and selecting a region needs the map open first. */}
           <button type="button" className={`circle map ${p.mapVisible ? 'on' : ''}`}
                   onClick={p.onToggleMap} aria-label={p.mapVisible ? 'Hide map' : 'Show map'}
-                  title={p.mapVisible ? 'Hide the map' : 'Show the map, then right-drag on it to select a region'}>
+                  title={p.mapVisible ? 'Hide the map'
+                                 : 'Show the map, then right-click or right-drag on it to draw a region'}>
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
                  strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 3.5 3.4 5.6a1 1 0 0 0-.65.94v13.2a.7.7 0 0 0 .95.65L9 18.5l6 2 5.6-2.1a1 1 0 0 0 .65-.94V4.26a.7.7 0 0 0-.95-.65L15 5.5Z" />

@@ -65,6 +65,9 @@ export default function App() {
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
   const [tab, setTab] = useState<AppTab>('chat');
+  // Where the Remote sensing tab lands you. The demo is about this pair of cities, and a map
+  // opened over the whole country asks the visitor to go and find the subject first.
+  const CHAMPAIGN_URBANA: [number, number, number, number] = [-88.32, 40.05, -88.14, 40.16];
   const [showSettings, setShowSettings] = useState(false);
   // Which models this agent will accept. Fetched once so the picker offers what is actually
   // served rather than a hardcoded list that drifts; null just means "agent default only".
@@ -593,7 +596,13 @@ export default function App() {
           // The remote-sensing tab is ABOUT the map: there is no drawing a region on a map
           // that is not on screen, so opening the tab opens the map. Leaving it does not
           // close the map again — by then the user may have put something on it.
-          if (t === 'rs') setMapVisible(true);
+          if (t !== 'rs') return;
+          setMapVisible(true);
+          // Land on the subject — but only when there is nothing of the user's to displace.
+          // Yanking the view away from a layer they just produced, or a region they drew,
+          // would be worse than starting them somewhere generic. fitView carries the waiting:
+          // the map may not have loaded yet, and it re-fits once the pane finishes expanding.
+          if (!layers.length && !drawnRegion) fitView(bboxToFC(CHAMPAIGN_URBANA));
         }} />
       {showHistory && (
         <div className="history" role="dialog" aria-label="Past conversations">
