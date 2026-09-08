@@ -497,10 +497,21 @@ def test_the_redirect_still_leaves_a_way_to_get_a_pixel_image(tmp_path):
     assert "rectangle" in hint.lower(), "and say the image is wider than the shape"
 
 
-def test_an_explicit_bbox_is_still_honoured():
+def test_an_explicit_bbox_is_still_honoured(monkeypatch):
+    """The model-name check must be reached, i.e. the region check did not block first.
+
+    The service is stubbed. embed_region calls /api/models BEFORE validating the name, so
+    without a stub this asserted on a connection error instead of the check under test — and
+    passed only on a machine that happened to be running rs-embed on localhost:8077. Sixteen
+    of this file's tests already stub `_svc`; this one was reaching the network.
+    """
     import json
 
+    import agent_runtime.rs_embed_tools as T
     from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    monkeypatch.setattr(T, "_svc", lambda *a, **k: {
+        "models": [{"id": "gse", "type": "precomputed"}]})
 
     tools = {t.name: t for t in make_rs_embed_tools()}
     out = json.loads(tools["embed_region"].func(bbox=[-87.63, 41.84, -87.60, 41.87],

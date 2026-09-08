@@ -3345,6 +3345,21 @@ def _apply_execution_honesty(session: Any, result: Dict[str, Any], *, prose_key:
         turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
         reran = True
 
+    _record_execution_outcome(result, turn)
+    return reran
+
+
+def _record_execution_outcome(result: Dict[str, Any], turn: Dict[str, Any]) -> bool:
+    """Write ``executed`` and ``execution_error`` from what the turn's tool results show.
+
+    The pair must be written TOGETHER, and the CLEAR is the half that gets forgotten. This
+    logic was written out twice — once here and once in the code peer's dead-end branch — and
+    only one copy removed a stale error, so a second run that succeeded shipped beside the
+    failure it had just fixed and the grounding auditor read a working run as a broken one.
+    One function, so the two cannot drift apart again.
+
+    Returns whether a run is recorded.
+    """
     ran, error = _execution_outcome(turn)
     result["executed"] = bool(ran)
     # Only when a run actually failed: an absent run is already said by executed=False, and a
@@ -3353,7 +3368,7 @@ def _apply_execution_honesty(session: Any, result: Dict[str, Any], *, prose_key:
         result["execution_error"] = error
     elif "execution_error" in result:
         result.pop("execution_error")
-    return reran
+    return bool(ran)
 
 
 def _ships_unrun_code(answer: str) -> bool:
@@ -3652,10 +3667,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
                 result["tool_results"] = list(_session.turn_artifacts["tool_results"])
                 turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
-                ran, exec_error = _execution_outcome(turn)
-                result["executed"] = bool(ran)
-                if exec_error and not ran:
-                    result["execution_error"] = exec_error
+                ran = _record_execution_outcome(result, turn)
                 caps = list(dict.fromkeys(r["capability"] for r in requests))
         if caps:
             result["needs"] = caps  # model-driven request(s)

@@ -49,17 +49,22 @@ def _resolve_input_file(ref: str) -> Tuple[Path, Optional[Dict[str, Any]]]:
     return path, rec
 
 
-def _free_dest(filename: str, claimed: Dict[str, str]) -> str:
-    """A name in the work dir that nothing has claimed yet, derived from ``filename``.
+def _free_dest(filename: str, taken: Any) -> str:
+    """A name in the work dir that nothing has claimed, derived from ``filename``.
 
-    Reached only when every name a file could use is already taken by another input. An ugly
-    name the model can open beats a file it cannot reach at all.
+    Reached only when every name a file could use is taken by another input. An ugly name the
+    model can open beats a file it cannot reach at all.
+
+    ``taken`` must include the names later inputs will legitimately own, not just the ones
+    already handed out: searching only the latter let a derived name land on a filename a
+    subsequent input actually has, and that input then lost its own name and became reachable
+    by file_id alone — or, with no file_id, not at all.
     """
     base = str(filename or "input")
     head, dot, tail = base.rpartition(".")
     stem, suffix = (head, "." + tail) if dot and head else (base, "")
     n = 2
-    while f"{stem}_{n}{suffix}" in claimed:
+    while f"{stem}_{n}{suffix}" in taken:
         n += 1
     return f"{stem}_{n}{suffix}"
 
@@ -80,15 +85,12 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
     max_files = _max_input_files()
     max_bytes = _max_input_bytes()
     seen_sources: set[str] = set()
-    # Which /work name each input has claimed. The dedupe below is keyed on the SOURCE, so two
-    # different files sharing a filename both used to emit the same dest: the second copy
-    # silently overwrote the first while `available_as` went on telling the model both were
-    # there, and the peer analysed the wrong dataset under the right name. Worse when neither
-    # has a file_id — two local paths with the same basename left ONE file in /work, with the
-    # first unreachable under any name at all.
-    claimed: Dict[str, str] = {}
     total_bytes = 0
 
+    # PASS 1 — resolve, dedupe by source, and apply the caps. Names are not handed out yet:
+    # who owns a contested filename depends on the whole list, so it cannot be decided while
+    # walking it.
+    resolved: List[Dict[str, Any]] = []
     for ref in refs:
         try:
             host_path, record = _resolve_input_file(ref)
@@ -102,29 +104,57 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
             size = int((record or {}).get("size_bytes") or host_path.stat().st_size)
         except OSError:
             size = 0
-        if len(staged_info) >= max_files:
+        if len(resolved) >= max_files:
             skipped.append({"ref": str(ref), "reason": "max input files exceeded", "limit": max_files})
             continue
         if total_bytes + size > max_bytes:
             skipped.append({"ref": str(ref), "reason": "max total input size exceeded",
                             "limit_bytes": max_bytes, "size_bytes": size})
             continue
-
         seen_sources.add(src)
         total_bytes += size
-        filename = (record or {}).get("filename") or host_path.name
-        file_id = (record or {}).get("file_id")
-        names = [n for n in dict.fromkeys(x for x in (file_id, filename) if x)
-                 if n not in claimed]
+        resolved.append({"ref": str(ref), "src": src,
+                         "filename": (record or {}).get("filename") or host_path.name,
+                         "file_id": (record or {}).get("file_id")})
+
+    # PASS 2 — allocate names.
+    #
+    # A file_id is unique by construction, so every input that has one keeps it. The human
+    # FILENAME is what gets contested, and it goes to the LAST input that claims it.
+    #
+    # That direction is the fix. `refs` arrives oldest-first — the session's earlier files,
+    # then this turn's uploads (get_session_files is documented as returning ids oldest
+    # first) — so handing the plain name to the FIRST claimant gave it to a file from an
+    # earlier turn. Upload a corrected data.csv, ask about it, and the peer opened the name it
+    # was given in the question and read the previous turn's data instead: a wrong answer with
+    # nothing on the surface to show for it. The reverse mistake — asking for an older file by
+    # bare name after re-uploading a different one under that name — is both rarer and
+    # ambiguous to a human reader too.
+    filename_owner: Dict[str, int] = {}
+    for i, entry in enumerate(resolved):
+        if entry["filename"]:
+            filename_owner[str(entry["filename"])] = i
+
+    # Every name that will legitimately be owned, so a derived fallback cannot take one.
+    taken: set[str] = {str(e["file_id"]) for e in resolved if e["file_id"]} | set(filename_owner)
+
+    for i, entry in enumerate(resolved):
+        names: List[str] = []
+        if entry["file_id"]:
+            names.append(str(entry["file_id"]))
+        filename = str(entry["filename"] or "")
+        if filename and filename_owner.get(filename) == i and filename not in names:
+            names.append(filename)
         if not names:
-            names = [_free_dest(filename, claimed)]
+            dest = _free_dest(filename or "input", taken)
+            taken.add(dest)
+            names.append(dest)
         for dest in names:
-            claimed[dest] = str(ref)
-            staging.append({"source": src, "dest": dest})
+            staging.append({"source": entry["src"], "dest": dest})
         # `available_as` is what the model is told to open, so it must be the names this file
         # ACTUALLY has — not the ones it would have had if nothing else were staged.
-        staged_info.append({"ref": str(ref), "file_id": file_id, "filename": filename,
-                            "available_as": names})
+        staged_info.append({"ref": entry["ref"], "file_id": entry["file_id"],
+                            "filename": entry["filename"], "available_as": names})
 
     return staging, staged_info, errors, skipped
 

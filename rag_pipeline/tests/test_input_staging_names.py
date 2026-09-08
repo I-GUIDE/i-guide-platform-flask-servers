@@ -47,12 +47,13 @@ def test_available_as_reports_only_the_names_the_file_really_has(monkeypatch):
     for entry in staged:
         for name in entry["available_as"]:
             assert name in dests, f"{name} advertised but never staged"
-    # the first claimant keeps the plain name; the second is honest about not having it
-    assert "data.csv" in staged[0]["available_as"]
-    assert "data.csv" not in staged[1]["available_as"]
+    # The LAST claimant keeps the plain name — refs arrive oldest-first, so the newest input
+    # is the one the question is about. The earlier file is honest about not having it.
+    assert "data.csv" not in staged[0]["available_as"]
+    assert "data.csv" in staged[1]["available_as"]
 
 
-def test_the_first_claimant_keeps_the_plain_name(monkeypatch):
+def test_a_lone_file_gets_both_of_its_names(monkeypatch):
     """Stability matters: the common single-file case must be unchanged."""
     _resolver(monkeypatch, {
         "a": (Path("/store/file_aaa__data.csv"), {"file_id": "file_aaa", "filename": "data.csv", "size_bytes": 10}),
@@ -73,8 +74,9 @@ def test_a_file_with_no_id_still_gets_a_reachable_name(monkeypatch):
     dests = [s["dest"] for s in staging]
     assert len(dests) == 2 and len(set(dests)) == 2, dests
     assert all(e["available_as"] for e in staged), "every input must be openable under some name"
-    assert staged[0]["available_as"] == ["data.csv"]
-    assert staged[1]["available_as"] == ["data_2.csv"]
+    # Last claimant owns the plain name; with no file_id the earlier one still needs a name.
+    assert staged[0]["available_as"] == ["data_2.csv"]
+    assert staged[1]["available_as"] == ["data.csv"]
 
 
 def test_the_same_source_twice_is_still_staged_once(monkeypatch):
@@ -93,3 +95,72 @@ def test_free_dest_keeps_the_extension():
     assert lex._free_dest("data.csv", {"data.csv": "a", "data_2.csv": "b"}) == "data_3.csv"
     assert lex._free_dest("noextension", {"noextension": "a"}) == "noextension_2"
     assert lex._free_dest("archive.tar.gz", {"archive.tar.gz": "a"}) == "archive.tar_2.gz"
+
+
+# --- who owns a contested filename ---------------------------------------------------------
+#
+# `refs` arrives oldest-first: the session's earlier files, then this turn's uploads
+# (get_session_files returns ids oldest first). Handing the plain name to the FIRST claimant
+# therefore gave it to a file from an earlier turn, and the peer opened the name it was given
+# in the question and read the wrong dataset — a wrong answer with nothing on the surface.
+
+def test_a_re_upload_under_the_same_name_owns_that_name(monkeypatch):
+    """Turn 1 uploads data.csv; turn 3 uploads a DIFFERENT data.csv and asks about it."""
+    _resolver(monkeypatch, {
+        "file_old": (Path("/store/file_old__data.csv"),
+                     {"file_id": "file_old", "filename": "data.csv", "size_bytes": 10}),
+        "file_new": (Path("/store/file_new__data.csv"),
+                     {"file_id": "file_new", "filename": "data.csv", "size_bytes": 10}),
+    })
+    _staging, staged, errors, _ = lex._build_staging(["file_old", "file_new"])
+    assert not errors
+    owners = [e["file_id"] for e in staged if "data.csv" in e["available_as"]]
+    assert owners == ["file_new"], f"data.csv went to {owners}, not the upload in question"
+    # the older file is still reachable, by the id that is unique to it
+    assert staged[0]["available_as"] == ["file_old"]
+
+
+def test_the_older_file_is_never_left_unreachable(monkeypatch):
+    """Losing the filename contest must not mean losing every name."""
+    _resolver(monkeypatch, {
+        "file_old": (Path("/store/file_old__data.csv"),
+                     {"file_id": "file_old", "filename": "data.csv", "size_bytes": 10}),
+        "file_new": (Path("/store/file_new__data.csv"),
+                     {"file_id": "file_new", "filename": "data.csv", "size_bytes": 10}),
+    })
+    staging, staged, _errors, _ = lex._build_staging(["file_old", "file_new"])
+    dests = {s["dest"] for s in staging}
+    for entry in staged:
+        assert entry["available_as"], f"{entry['ref']} has no name at all"
+        for name in entry["available_as"]:
+            assert name in dests
+
+
+def test_a_derived_name_does_not_steal_one_a_later_input_owns(monkeypatch):
+    """The fallback search used to consider only names already handed out, so it could land on
+    a filename a subsequent input actually has — and that input then lost its own name."""
+    _resolver(monkeypatch, {
+        "a/data.csv":   (Path("/A/data.csv"),   None),
+        "b/data.csv":   (Path("/B/data.csv"),   None),
+        "c/data_2.csv": (Path("/C/data_2.csv"), None),
+    })
+    staging, staged, errors, _ = lex._build_staging(["a/data.csv", "b/data.csv", "c/data_2.csv"])
+    assert not errors
+    dests = [s["dest"] for s in staging]
+    assert len(dests) == len(set(dests)), dests
+    # the input whose real name is data_2.csv keeps it
+    assert staged[2]["available_as"] == ["data_2.csv"]
+    # and the one that had to be renamed went past it
+    assert staged[0]["available_as"] == ["data_3.csv"]
+
+
+def test_three_files_sharing_one_filename_all_stay_reachable(monkeypatch):
+    _resolver(monkeypatch, {
+        r: (Path(f"/store/{r}__data.csv"), {"file_id": r, "filename": "data.csv", "size_bytes": 10})
+        for r in ("file_a", "file_b", "file_c")
+    })
+    staging, staged, _errors, _ = lex._build_staging(["file_a", "file_b", "file_c"])
+    dests = [s["dest"] for s in staging]
+    assert len(dests) == len(set(dests)), dests
+    assert [e["available_as"] for e in staged] == [
+        ["file_a"], ["file_b"], ["file_c", "data.csv"]]

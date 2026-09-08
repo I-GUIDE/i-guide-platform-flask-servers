@@ -229,3 +229,106 @@ def test_no_sandbox_means_no_retry():
     result = {"answer": "```python\nprint(1)\n```", "tool_calls": [], "tool_results": []}
     assert _apply(result, session, exec_available=False) is False
     assert session.runs == []
+
+
+# --- 4. driving the real default_code_fn through the dead end ------------------------------
+#
+# Everything above unit-tests the predicates. Nothing drove the peer, so the dead-end
+# intervention and the honesty call site could both be deleted outright without a single test
+# noticing — verified by mutation. These close that, and pin the half of the outcome contract
+# that was missing: a re-run that SUCCEEDS must remove the earlier run's error, or a success
+# ships beside the failure it just fixed and the auditor reads a working run as a broken one.
+
+class _ScriptedRun:
+    """Matches executor_factory.PeerRun: resp, artifacts, answer."""
+
+    def __init__(self, answer, artifacts):
+        self.resp = {"answer": answer}
+        self.artifacts = artifacts
+        self.answer = answer
+
+
+class _ScriptedSession:
+    """Faithful to PeerSession: each run returns only ITS artifacts, turn_artifacts accrues."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.prompts = []
+        self.turn_artifacts = {"tool_calls": [], "tool_results": []}
+
+    def run(self, query, chat_history=None):
+        self.prompts.append(query)
+        answer, results = self.script.pop(0) if self.script else ("done", [])
+        calls = [{"name": "execute_code", "id": "c"} for _ in results]
+        self.turn_artifacts["tool_calls"].extend(calls)
+        self.turn_artifacts["tool_results"].extend(results)
+        return _ScriptedRun(answer, {"tool_calls": calls, "tool_results": list(results)})
+
+
+def _drive_code_peer(monkeypatch, script):
+    """Run the real default_code_fn with only the executor boundary stubbed."""
+    import agent_runtime.executor_factory as ef
+    import agent_runtime.runtime_utils as ru
+
+    session = _ScriptedSession(script)
+    monkeypatch.setattr(ef, "open_peer_session", lambda *a, **k: session)
+    monkeypatch.setattr(ef, "build_agent_executor", lambda *a, **k: object())
+    monkeypatch.setattr(ef, "agent_config", lambda *a, **k: {})
+    monkeypatch.setattr(ef, "child_thread_id", lambda *a, **k: "t")
+    monkeypatch.setattr(ru, "extract_final_answer", lambda resp: (resp or {}).get("answer", ""))
+    monkeypatch.setattr(ru, "extract_search_artifacts",
+                        lambda *a, **k: {"tool_calls": [], "tool_results": []})
+
+    fn = g.default_code_fn(llm=object(), code_exec=True)
+    return fn("analyse it", [], {"thread_id": "th"}), session
+
+
+FAILED_RUN = _exec_result(False, "ModuleNotFoundError: pysal", 1)
+
+
+def test_the_dead_end_intervention_actually_fires(monkeypatch):
+    """Two failures of one tool and no capability request: the peer gets one more run."""
+    _out, session = _drive_code_peer(monkeypatch, [
+        ("no code fence here", [FAILED_RUN, FAILED_RUN]),
+        ("fixed it", [_exec_result(True)]),
+    ])
+    assert len(session.prompts) == 2, "the peer was never handed the dead-end observation"
+    assert "failed repeatedly" in session.prompts[1] or "pysal" in session.prompts[1]
+
+
+def test_a_successful_re_run_clears_the_earlier_error(monkeypatch):
+    """The half that was missing. execution_error is set from the first two failures, and the
+    dead-end branch re-derived the outcome without removing it."""
+    out, _session = _drive_code_peer(monkeypatch, [
+        ("no code fence here", [FAILED_RUN, FAILED_RUN]),
+        ("fixed it", [_exec_result(True)]),
+    ])
+    assert out["executed"] is True
+    assert "execution_error" not in out, f"stale error survived: {out.get('execution_error')!r}"
+
+
+def test_a_re_run_that_also_fails_still_reports_the_failure(monkeypatch):
+    """Clearing must not become unconditional."""
+    out, _session = _drive_code_peer(monkeypatch, [
+        ("no code fence here", [FAILED_RUN, FAILED_RUN]),
+        ("still broken", [_exec_result(False, "pysal again", 1)]),
+    ])
+    assert out["executed"] is False
+    assert "pysal" in out["execution_error"]
+
+
+def test_one_extra_run_only(monkeypatch):
+    """5f828f4 caps the intervention at one extra run per turn."""
+    _out, session = _drive_code_peer(monkeypatch, [
+        ("no fence", [FAILED_RUN, FAILED_RUN]),
+        ("no fence", [FAILED_RUN, FAILED_RUN]),
+        ("no fence", [FAILED_RUN, FAILED_RUN]),
+    ])
+    assert len(session.prompts) == 2
+
+
+def test_the_outcome_helper_is_the_only_writer():
+    """Both call sites must go through it, or the clear drifts out of one of them again."""
+    import inspect
+    src = inspect.getsource(g.default_code_fn) + inspect.getsource(g._apply_execution_honesty)
+    assert 'result["executed"]' not in src, "executed is being set outside the helper"
