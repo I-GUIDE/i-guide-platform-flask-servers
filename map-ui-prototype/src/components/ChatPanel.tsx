@@ -173,9 +173,36 @@ const BOTTOM_SLACK_PX = 32;
 
 export function ChatPanel(p: Props) {
   const [text, setText] = useState('');
+  // Which operation is STAGED. Clicking one does not fire it: it writes the composed question
+  // into the composer and opens the settings that built it, so the question can be read, tuned
+  // and edited before it is asked. null means nothing is staged and the settings stay closed —
+  // three selects above every conversation, for an operation nobody has chosen yet, is a form
+  // where an offer belongs.
+  const [rsOp, setRsOp] = useState<string | null>(null);
   const [rsModel, setRsModel] = useState('gse');
   const [rsYear, setRsYear] = useState('2022');
   const [rsSeason, setRsSeason] = useState('summer');
+
+  // Stage an operation, or re-stage the current one after a setting changes.
+  const stageRs = (label: string | null, model = rsModel, year = rsYear, season = rsSeason) => {
+    if (!label) return;
+    const action = rsActions(model, year, season).find((a) => a.label === label);
+    if (!action) return;
+    setRsOp(label);
+    setText(action.prompt);
+  };
+
+  // A setting changed: rewrite the staged question so the composer always shows what will
+  // actually be sent. Only while something IS staged — otherwise changing a select would put
+  // text into an empty composer the user never asked for.
+  const setRsOption = (which: 'model' | 'year' | 'season', value: string) => {
+    const next = { model: rsModel, year: rsYear, season: rsSeason, [which]: value } as
+      { model: string; year: string; season: string };
+    if (which === 'model') setRsModel(value);
+    if (which === 'year') setRsYear(value);
+    if (which === 'season') setRsSeason(value);
+    stageRs(rsOp, next.model, next.year, next.season);
+  };
   const scrollRef = useRef<HTMLDivElement>(null);
   // Whether the transcript is FOLLOWING new content. True while the reader is at the bottom,
   // false once they scroll up to read something. A ref, not state: it changes on every scroll
@@ -228,6 +255,9 @@ export function ChatPanel(p: Props) {
     const v = t.trim();
     if (!v || p.busy) return;
     setText('');
+    // The question has been asked, so nothing is staged any more — a later change to a select
+    // must not rewrite a composer the user has moved on from.
+    setRsOp(null);
     // Sending re-attaches. You asked the question; you want to watch the answer arrive, even
     // if you had scrolled up to re-read something before hitting enter.
     pinnedRef.current = true;
@@ -435,13 +465,27 @@ export function ChatPanel(p: Props) {
               <li className={p.hasRegion ? '' : 'muted'}>Pick an operation</li>
             </ol>
           )}
-          {/* What the operations are composed FROM. On the demo tab only: in the chat tab the
-              row is a small contextual offer once a region exists, and three selects would
-              outweigh it. There it uses these same defaults. */}
-          {p.tab === 'rs' && (
+          <div className="rsrow">
+            {/* The numbered steps above already say what this row is, and at a 460px panel the
+                label costs 126px — exactly enough to push the fourth operation onto a second
+                line. Kept where there are no steps to explain it. */}
+            {p.tab !== 'rs' && <span className="rslabel">🛰 satellite embedding</span>}
+            {rsActions(rsModel, rsYear, rsSeason).map((a) => (
+              <button key={a.label} className={`rsbtn ${rsOp === a.label ? 'on' : ''}`}
+                disabled={p.busy || !p.hasRegion}
+                aria-pressed={rsOp === a.label}
+                title={p.hasRegion ? a.prompt : `Draw a region on the map first — then: ${a.prompt}`}
+                onClick={() => stageRs(a.label)}>{a.label}</button>
+            ))}
+          </div>
+
+          {/* The settings that BUILT the staged question, shown only once there is one. They
+              sit below the operations and above the composer, between the choice they belong
+              to and the text they rewrite. */}
+          {rsOp && (
             <div className="rsopts">
               <label>model
-                <select value={rsModel} onChange={(e) => setRsModel(e.target.value)}>
+                <select value={rsModel} onChange={(e) => setRsOption('model', e.target.value)}>
                   {RS_MODELS.map((g) => (
                     <optgroup key={g.group} label={g.group}>
                       {g.ids.map((id) => <option key={id} value={id}>{id}</option>)}
@@ -450,28 +494,17 @@ export function ChatPanel(p: Props) {
                 </select>
               </label>
               <label>year
-                <select value={rsYear} onChange={(e) => setRsYear(e.target.value)}>
+                <select value={rsYear} onChange={(e) => setRsOption('year', e.target.value)}>
                   {RS_YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
                 </select>
               </label>
               <label>months
-                <select value={rsSeason} onChange={(e) => setRsSeason(e.target.value)}>
+                <select value={rsSeason} onChange={(e) => setRsOption('season', e.target.value)}>
                   {RS_SEASONS.map((sn) => <option key={sn.id} value={sn.id}>{sn.label}</option>)}
                 </select>
               </label>
             </div>
           )}
-          <div className="rsrow">
-            {/* The numbered steps above already say what this row is, and at a 460px panel the
-                label costs 126px — exactly enough to push the fourth operation onto a second
-                line. Kept where there are no steps to explain it. */}
-            {p.tab !== 'rs' && <span className="rslabel">🛰 satellite embedding</span>}
-            {rsActions(rsModel, rsYear, rsSeason).map((a) => (
-              <button key={a.label} className="rsbtn" disabled={p.busy || !p.hasRegion}
-                title={p.hasRegion ? a.prompt : `Draw a region on the map first — then: ${a.prompt}`}
-                onClick={() => p.onSend(a.prompt)}>{a.label}</button>
-            ))}
-          </div>
         </div>
       )}
 

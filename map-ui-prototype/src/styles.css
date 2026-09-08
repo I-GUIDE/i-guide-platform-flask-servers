@@ -324,3 +324,7 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .rsopts select { font-size: 12px; padding: 3px 6px; border: 1px solid var(--line);
                  border-radius: 7px; background: #fff; color: var(--ink); max-width: 130px; }
 .rsopts select:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+
+/* The staged operation, and the hint that the composed question is editable. */
+.rsbtn.on { background: #f6b93b; border-color: #c98a1a; color: #3d2a02; }
+.rsbtn.on:hover:not(:disabled) { background: #f2ad20; }
