@@ -123,15 +123,70 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
   );
 }
 
+// How far from the bottom still counts as being AT the bottom. Never assume exactly 0:
+// sub-pixel rounding and fractional device pixel ratios leave a residue of a pixel or two, and
+// a reader a hair off the bottom still means "keep following".
+const BOTTOM_SLACK_PX = 32;
+
 export function ChatPanel(p: Props) {
   const [text, setText] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Whether the transcript is FOLLOWING new content. True while the reader is at the bottom,
+  // false once they scroll up to read something. A ref, not state: it changes on every scroll
+  // event and nothing renders from it, so re-rendering the transcript on each one would be
+  // pure waste during a stream.
+  const pinnedRef = useRef(true);
+  // Until when a scroll may be treated as the READER's. Not every scroll event is one: the
+  // browser re-anchors the scroll position by itself as streaming content reflows above the
+  // viewport, and an earlier version of this took those for the reader scrolling away and
+  // detached — permanently, because only a scroll back to the bottom re-attaches, and the
+  // reader had never scrolled at all. So a scroll can only DETACH while the reader is
+  // demonstrably driving; anything else can only ever re-attach.
+  const drivingUntilRef = useRef(0);
+
+  // Generous, to cover trackpad momentum after the last wheel event. Harmless if it is too
+  // long: the only scrolls this window admits are ones that land away from the bottom, and a
+  // programmatic follow always lands AT it.
+  const markDriving = () => { drivingUntilRef.current = Date.now() + 1200; };
+
+  const isAtBottom = () => {
+    const el = scrollRef.current;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK_PX;
+  };
+
+  const onScroll = () => {
+    // Landing at the bottom always re-attaches, whoever caused it.
+    if (isAtBottom()) { pinnedRef.current = true; return; }
+    // Away from the bottom detaches only if the reader put it there.
+    if (Date.now() < drivingUntilRef.current) pinnedRef.current = false;
+  };
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    const el = scrollRef.current;
+    // Follow only when the reader is already at the bottom. This used to scroll
+    // unconditionally, and with the full trace on it fires constantly — every reasoning step
+    // patches `messages` with a new array — so reading anything above the fold was impossible:
+    // the view was dragged back down mid-sentence every few hundred milliseconds. It fired
+    // even with the reasoning block COLLAPSED, because the steps still change the array
+    // whether or not anything visible grew.
+    if (!el || !pinnedRef.current) return;
+    // Instant, not smooth. A smooth scroll animates THROUGH positions that are not at the
+    // bottom, and the handler below would read those as the reader moving away and unpin — so
+    // the next step would silently stop following. Nothing looks smooth anyway when steps
+    // arrive faster than the animation can finish.
+    el.scrollTop = el.scrollHeight;
   }, [p.messages, p.busy]);
 
-  const send = (t: string) => { const v = t.trim(); if (!v || p.busy) return; setText(''); p.onSend(v); };
+  const send = (t: string) => {
+    const v = t.trim();
+    if (!v || p.busy) return;
+    setText('');
+    // Sending re-attaches. You asked the question; you want to watch the answer arrive, even
+    // if you had scrolled up to re-read something before hitting enter.
+    pinnedRef.current = true;
+    p.onSend(v);
+  };
 
   return (
     <section className="chat">
@@ -300,6 +355,9 @@ export function ChatPanel(p: Props) {
       )}
 
       <div className="transcript" ref={scrollRef}
+        onScroll={onScroll}
+        onWheel={markDriving} onTouchMove={markDriving}
+        onMouseDown={markDriving} onKeyDown={markDriving}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => { e.preventDefault(); const fs = Array.from(e.dataTransfer.files || []); if (fs.length) p.onUpload(fs); }}>
         {p.messages.map((m, i) => m.role === 'user' ? (
