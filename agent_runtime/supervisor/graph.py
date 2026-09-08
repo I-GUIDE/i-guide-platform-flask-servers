@@ -3258,7 +3258,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                 _session, result, prose_key="summary",
                 exec_available=(code_exec if code_exec is not None
                                 else is_code_exec_enabled()),
-                caps=caps, node="analyze"):
+                caps=caps, node="analyze", any_fence=False):
             caps = list(dict.fromkeys(r["capability"] for r in requests))
         if caps:
             result["needs"] = caps  # model-driven request(s)
@@ -3268,6 +3268,13 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
 
 
 _CODE_FENCE_RE = re.compile(r"^```[\w+-]*\s*$", re.M)
+# A fence that DECLARES a programming language. `_CODE_FENCE_RE` matches any fence, including
+# the untagged ones prose uses for a table of counts or a stdout excerpt — fine on the code
+# peer, whose deliverable IS code, but a false positive on a peer whose deliverable is prose.
+_CODE_LANG_FENCE_RE = re.compile(
+    r"^```(?:python|py|r|sql|js|javascript|ts|typescript|bash|sh|shell|zsh|ruby|rb|java|"
+    r"scala|julia|matlab|c|cpp|c\+\+|go|rust|perl|php|lua|swift|kotlin|dockerfile)\s*$",
+    re.M | re.I)
 
 
 def _has_execution_record(artifacts: Dict[str, Any]) -> bool:
@@ -3306,7 +3313,8 @@ def _execution_outcome(artifacts: Dict[str, Any]) -> Tuple[bool, str]:
 
 
 def _apply_execution_honesty(session: Any, result: Dict[str, Any], *, prose_key: str,
-                             exec_available: bool, caps: List[str], node: str) -> bool:
+                             exec_available: bool, caps: List[str], node: str,
+                             any_fence: bool = True) -> bool:
     """Make a peer's result tell the truth about whether its code RAN. Returns: did we re-run.
 
     This lives here, and takes the peer as a parameter, because the invariant is about the
@@ -3329,7 +3337,7 @@ def _apply_execution_honesty(session: Any, result: Dict[str, Any], *, prose_key:
     reran = False
     if (exec_available
             and not _has_execution_record(turn)
-            and _ships_unrun_code(result.get(prose_key) or "")):
+            and _ships_unrun_code(result.get(prose_key) or "", any_fence=any_fence)):
         blocked = bool(caps)
         emit_trace_event(
             "code_not_executed",
@@ -3371,9 +3379,22 @@ def _record_execution_outcome(result: Dict[str, Any], turn: Dict[str, Any]) -> b
     return bool(ran)
 
 
-def _ships_unrun_code(answer: str) -> bool:
-    """Whether an answer hands back a code block as its result."""
-    return bool(_CODE_FENCE_RE.search(str(answer or "")))
+def _ships_unrun_code(answer: str, *, any_fence: bool = True) -> bool:
+    """Whether an answer hands back a code block as its result.
+
+    ``any_fence`` is right for the code peer: its deliverable IS code, so a fence is a fair
+    proxy whether or not it names a language.
+
+    It is wrong for a peer whose deliverable is prose plus map layers. An analyze summary
+    routinely fences a table of counts or a stdout excerpt with a bare ```, and treating that
+    as shipped code spent a whole extra model run challenging the peer about code it had never
+    written — then, if the peer stood by its answer, told the reader it had been challenged.
+    So there, require the fence to declare a language.
+    """
+    text = str(answer or "")
+    if any_fence:
+        return bool(_CODE_FENCE_RE.search(text))
+    return bool(_CODE_LANG_FENCE_RE.search(text))
 
 
 # The prompt used to carry this as a threat ("an answer that only pastes code … is a
@@ -3883,7 +3904,26 @@ def build_supervisor_graph(
     def search_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "search", "message": "Searching"}, node="search")
-        raw = do_search(q, state) or []
+        try:
+            raw = do_search(q, state) or []
+        except Exception as exc:  # noqa: BLE001 - a dead peer must not be a dead turn
+            # The third node with the same gap. Search is usually the FIRST peer to run, so a
+            # raise here loses the turn before any other peer has contributed anything.
+            logger.exception("search peer failed; continuing the turn without it")
+            emit_trace_event(
+                "node_failed",
+                {"stage": "search", "message": f"search peer failed: {type(exc).__name__}"},
+                node="search",
+            )
+            # Only DECLARED state keys: SupervisorState has no search_error channel, and an
+            # unknown key would make this handler raise the very error it exists to absorb.
+            # The attempt is counted and the streak advanced, so the exhaustion logic stops
+            # routing to a peer that keeps dying instead of looping on it.
+            return {
+                "evidence": state.get("evidence") or [],
+                "search_attempts": state.get("search_attempts", 0) + 1,
+                "search_empty_streak": state.get("search_empty_streak", 0) + 1,
+            }
         # A search_fn may return a plain list (every test double does, and so may a custom one)
         # or a dict carrying documents + the ledger rows for what it actually did. Both stay
         # supported; only the dict form contributes rows.
@@ -3979,7 +4019,24 @@ def build_supervisor_graph(
     def analysis_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "analyze", "message": "Running analysis workflow"}, node="analyze")
-        clean, needs = _extract_needs(do_analyze(q, state.get("evidence") or [], state))
+        try:
+            clean, needs = _extract_needs(do_analyze(q, state.get("evidence") or [], state))
+        except Exception as exc:  # noqa: BLE001 - a dead peer must not be a dead turn
+            # Same reason code_node has one, and more pressing: this is the peer the router
+            # actually sends code-shaped work to (measured: 7 of 7 turns reported
+            # peer=analysis), and it invokes the model up to five times per turn — the initial
+            # run plus the stuck, map-not-delivered, model-mismatch and execution-honesty
+            # retries. Any of them can hit the recursion limit, and without a handler that
+            # raised straight out of the graph: SSE error, no synthesized answer, even when
+            # search had already found something worth saying.
+            logger.exception("analyze peer failed; continuing the turn without it")
+            emit_trace_event(
+                "node_failed",
+                {"stage": "analyze", "message": f"analyze peer failed: {type(exc).__name__}"},
+                node="analyze",
+            )
+            return {"analysis_results": {"summary": "", "tool_calls": [], "tool_results": [],
+                                         "error": f"{type(exc).__name__}: {exc}"[:300]}}
         emit_trace_event("node_completed", {"stage": "analyze", "message": "Analysis workflow complete"}, node="analyze")
         update: Dict[str, Any] = {"analysis_results": clean}
         if unified_peer_enabled(state) and isinstance(clean, dict):

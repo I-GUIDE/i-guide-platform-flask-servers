@@ -332,3 +332,40 @@ def test_the_outcome_helper_is_the_only_writer():
     import inspect
     src = inspect.getsource(g.default_code_fn) + inspect.getsource(g._apply_execution_honesty)
     assert 'result["executed"]' not in src, "executed is being set outside the helper"
+
+
+# --- 5. a fence is not always code --------------------------------------------------------
+#
+# The predicate is a bare-fence match, which is a fair proxy on the code peer, whose
+# deliverable IS code. Pointed at the analyze peer — whose deliverable is prose plus map
+# layers — an ordinary table of counts or a stdout excerpt read as shipped code, spending a
+# whole extra model run challenging the peer about code it never wrote.
+
+ANALYZE_PROSE_WITH_A_TABLE = (
+    "Counts per community area:\n\n```\nAustin 1204\nLoop 873\n```\n\n"
+    "The choropleth is on your interactive map."
+)
+ANALYZE_PROSE_WITH_TEXT_FENCE = "Result:\n```text\nGEOID  n\n17019  801\n```"
+REAL_PYTHON = "Here is the loader:\n\n```python\nimport requests\nr = requests.get(url)\n```"
+
+
+def test_an_untagged_table_is_not_shipped_code_for_a_prose_peer():
+    assert g._ships_unrun_code(ANALYZE_PROSE_WITH_A_TABLE, any_fence=False) is False
+    assert g._ships_unrun_code(ANALYZE_PROSE_WITH_TEXT_FENCE, any_fence=False) is False
+
+
+def test_real_code_is_still_caught_for_a_prose_peer():
+    assert g._ships_unrun_code(REAL_PYTHON, any_fence=False) is True
+
+
+def test_the_code_peer_reading_is_unchanged():
+    """Its deliverable is code, so an untagged fence is still a fair proxy there."""
+    for text in (ANALYZE_PROSE_WITH_A_TABLE, ANALYZE_PROSE_WITH_TEXT_FENCE, REAL_PYTHON):
+        assert g._ships_unrun_code(text) is True
+
+
+def test_the_analyze_call_site_asks_for_the_stricter_reading():
+    """Otherwise the default silently reinstates the false positive."""
+    import inspect
+    src = inspect.getsource(g.default_analyze_fn)
+    assert "any_fence=False" in src
