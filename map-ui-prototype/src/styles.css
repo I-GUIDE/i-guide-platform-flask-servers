@@ -351,11 +351,21 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
    switch between two setups of one page, not a second application. */
 .tabs { display: flex; gap: 2px; margin-left: 18px; background: var(--soft); padding: 3px; border-radius: 999px; position: relative; }
 .tab { font-size: 13px; font-weight: 600; padding: 5px 14px; border: 0; border-radius: 999px;
-       background: transparent; color: #5b6167; cursor: pointer; white-space: nowrap; }
+       background: transparent; color: #5b6167; cursor: pointer; white-space: nowrap;
+       /* Matches the lens's own transition below so the label's color arrives WITH the green
+          fill instead of snapping to white the instant React flips the .on class — a plain
+          class swap here beat the lens by the full 460ms and read as a gray flash. */
+       transition: color 460ms cubic-bezier(.22, 1.18, .36, 1); }
 .tab:hover:not(.on) { color: var(--ink); }
+/* The base button rule's `button:hover:not(:disabled) { background: var(--soft) }` outranks
+   `.tab.on`'s own `background: none` on specificity, so hovering the SELECTED tab repainted it
+   solid gray over the green lens underneath. Invisible on an unselected tab only because its
+   track is that same gray; glaring on the green one, especially right after a click when the
+   cursor is still sitting there while the lens travels. */
+.tab:hover:not(:disabled) { background: none; }
 /* The selected tab no longer paints its own background: the lens behind it is the selection,
    and two of them would double the highlight during the travel. */
-.tab.on { background: none; color: var(--ink); box-shadow: none; }
+.tab.on { background: none; color: #fff; box-shadow: none; }
 .tab { position: relative; z-index: 1; }
 
 /* Liquid glass. The lens is a real translucent material rather than a white pill: it blurs and
@@ -373,13 +383,13 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 }
 .tabglass-lens {
   position: absolute; inset: 0; border-radius: 999px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .96), rgba(255, 255, 255, .74));
+  background: linear-gradient(180deg, #1db386, var(--brand));
   -webkit-backdrop-filter: blur(14px) saturate(180%);
   backdrop-filter: blur(14px) saturate(180%);
   box-shadow: 0 1px 2px rgba(16, 24, 40, .10),
               0 0 0 .5px rgba(16, 24, 40, .06),
-              inset 0 1px 0 rgba(255, 255, 255, .95),
-              inset 0 -1px 0 rgba(16, 24, 40, .05);
+              inset 0 1px 0 rgba(255, 255, 255, .35),
+              inset 0 -1px 0 rgba(16, 24, 40, .12);
 }
 .tabglass.travelling .tabglass-lens { animation: tab-lens 460ms cubic-bezier(.4, 0, .2, 1); }
 @keyframes tab-lens {
@@ -391,6 +401,7 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 @media (prefers-reduced-motion: reduce) {
   .tabglass { transition: none; }
   .tabglass.travelling .tabglass-lens { animation: none; }
+  .tab { transition: none; }
 }
 .tab:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 
