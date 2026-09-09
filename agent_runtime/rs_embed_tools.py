@@ -69,6 +69,48 @@ def _svc(path: str, payload: Optional[Dict[str, Any]] = None, *, method: str = "
         return {"error": f"rs-embed service returned unparseable output: {exc}"}
 
 
+def _svc_upload(path: str, file_path: Any, *, field: str = "file",
+                timeout: Optional[float] = None) -> Dict[str, Any]:
+    """POST a file to the rs-embed service as multipart/form-data.
+
+    The same failure branches as :func:`_svc`, worded the same: a caller cannot tell from the
+    result which helper produced the error, and "the service is down, do not invent a value"
+    has to read identically either way.
+    """
+    import requests
+
+    url = f"{RS_EMBED_URL}{path}"
+    timeout = float(timeout or _TIMEOUT_S)
+    try:
+        with open(file_path, "rb") as fh:
+            r = requests.post(url, files={field: (Path(str(file_path)).name, fh,
+                                                  "application/octet-stream")},
+                              timeout=timeout)
+    except FileNotFoundError:
+        return {"error": f"the file to upload is gone: {file_path}"}
+    except requests.exceptions.ConnectionError:
+        return {"error": f"the rs-embed service is not reachable at {RS_EMBED_URL}",
+                "hint": "Start it with: python -m uvicorn server:app --app-dir examples/webapp "
+                        "--port 8077 (from the rs-embed repo), or set RS_EMBED_URL to where it runs. "
+                        "Without it no embedding tool can run — say so rather than inventing values."}
+    except requests.exceptions.Timeout:
+        return {"error": f"the rs-embed service did not answer within {timeout:.0f}s",
+                "hint": "A pooled-vector upload is a few kilobytes and normally answers at once, "
+                        "so a timeout here means the service is wedged rather than busy."}
+    if r.status_code >= 400:
+        detail = ""
+        try:
+            body = r.json()
+            detail = str(body.get("error") or body.get("detail") or "")[:400]
+        except Exception:  # noqa: BLE001
+            detail = r.text[:400]
+        return {"error": f"rs-embed service returned HTTP {r.status_code}", "detail": detail}
+    try:
+        return r.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"rs-embed service returned unparseable output: {exc}"}
+
+
 # --- geometry ------------------------------------------------------------------
 def _mercator_square(lon: float, lat: float, buffer_m: float) -> List[float]:
     """The +/-buffer_m square around (lon, lat) measured in EPSG:3857, as a lon/lat bbox."""
@@ -596,6 +638,132 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                                    "quote it, because a confident number from a weak head is "
                                    "still a weak number."})
 
+    def predict_from_package(file_id: str) -> str:
+        """Run the pretrained heads on an embedding you ALREADY have — no re-embedding.
+
+        Pass the `embedding_package.file_id` from an embed_region result, from this turn or any
+        earlier one. The heads are trained weights that live on the service and are never
+        exported, so this is the only route to them from here, but the EMBEDDING is already
+        paid for: this fetches no imagery, spends no Earth Engine quota, and answers in
+        milliseconds instead of minutes. Use it whenever a region has already been embedded —
+        including when embedding is failing, since this path does not need Earth Engine at all.
+
+        It scores the package's own pooled vectors, which is the same grid-then-average recipe
+        the heads were trained on. Call list_prediction_heads first: coverage is narrow, and
+        the result says plainly which models in the package have no head.
+
+        This is ONE estimate for the whole region, not a per-pixel map, and the heads were
+        fitted on a single crop in one state in one year. The result carries an
+        `outside_training_domain` list whenever the package sits outside that — read it out
+        rather than quoting the probability alone.
+        """
+        from agent_runtime import rs_embed_head_domain as domain
+        from agent_runtime.file_store import resolve_file_id
+
+        fid = str(file_id or "").strip()
+        if not fid:
+            return json.dumps({"ok": False, "error": "no file_id given",
+                               "hint": "Pass embedding_package.file_id from an embed_region "
+                                       "result."})
+        try:
+            path = resolve_file_id(fid)
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({
+                "ok": False, "error": f"cannot resolve {fid!r}: {type(exc).__name__}: {exc}"[:300],
+                "hint": "Pass embedding_package.file_id from an embed_region result — the .npz, "
+                        "not the PNG and not the map layer."})
+
+        vectors, problems = domain.pooled_vectors(path)
+        if not vectors:
+            return json.dumps({
+                "ok": False,
+                "error": f"{Path(str(path)).name} holds no pooled embedding vectors",
+                "problems": problems or None,
+                "hint": "embed_region saves a package of pooled__<model> arrays — pass its "
+                        "embedding_package.file_id. embed_zones does NOT write one: it writes a "
+                        "CSV of per-zone vectors, and these heads were fitted on ~2.6 km squares "
+                        "rather than on polygons, so they should not be applied to zone rows. To "
+                        "predict a per-zone value, use fit_zone_model with your own labels."})
+
+        heads = _svc("/api/heads", method="GET")
+        if heads.get("error"):
+            return json.dumps({"ok": False, **heads})
+        # Every head's own width, so a right-width wrong-model vector is refused HERE rather
+        # than being scored on the far side of an upload. Intersecting first also means a
+        # package for a model with no head never travels at all.
+        head_dim = {str(h.get("model")): h.get("dim") for h in (heads.get("models") or [])}
+        head_score = {str(h.get("model")): h for h in (heads.get("models") or [])}
+
+        usable: List[str] = []
+        not_scored: List[Dict[str, Any]] = []
+        for model in sorted(vectors):
+            if model not in head_dim:
+                not_scored.append({"model": model, "why": "no pretrained head for this model"})
+                continue
+            refusal = domain.vector_refusal(model, vectors[model], head_dim.get(model))
+            if refusal:
+                entry: Dict[str, Any] = {"model": model, "why": refusal}
+                # When the width is one several models share, say so: the reason this tool
+                # trusts the package's key and not the array's shape is not self-evident.
+                shared = domain.width_note(int(vectors[model].size))
+                if shared:
+                    entry["also"] = shared
+                not_scored.append(entry)
+                continue
+            usable.append(model)
+
+        if not usable:
+            return json.dumps({
+                "ok": False,
+                "error": "nothing in this package can be scored by the available heads",
+                "not_scored": not_scored,
+                "heads_available": sorted(head_dim),
+                "task": heads.get("task"), "label": heads.get("label"),
+                "hint": "Embed the region with a model that has a head "
+                        f"({', '.join(sorted(head_dim)) or 'none'}) and try again, or use "
+                        "fit_zone_model to train a head on your own labels."})
+
+        # Only the pooled keys go over the wire. The service reads the whole body into memory and
+        # then uses nothing else, and packages in the store reach 216 MB because of their grids.
+        packed = domain.repack_pooled(path, Path(tempfile.mkdtemp(prefix="rsembed_head_")) / "pooled.npz",
+                                      usable)
+        res = _svc_upload("/api/predict_package", packed["path"])
+        if res.get("error"):
+            return json.dumps({"ok": False, **res})
+
+        manifest = domain.read_manifest(path)
+        out: Dict[str, Any] = {"ok": True, "package_file_id": fid, "scored_models": usable}
+        # Region and months come back onto the result because this tool takes no bbox argument:
+        # without them neither the answer nor the action ledger records WHAT was predicted.
+        out.update(domain.package_region(manifest))
+        out.update({k: v for k, v in res.items() if v not in (None, "", [], {})})
+        # /api/predict_package omits `region`, which is exactly the training-domain caveat.
+        if not out.get("region") and heads.get("region"):
+            out["region"] = heads["region"]
+        if not_scored:
+            out["not_scored"] = not_scored
+        warnings = domain.domain_warnings(manifest)
+        if warnings:
+            out["outside_training_domain"] = warnings
+        unverifiable = domain.unverifiable_domain(manifest)
+        if unverifiable:
+            out["domain_unverifiable"] = unverifiable
+        if "dofa" in usable:
+            out["pooling_note"] = (
+                "predict_for_region puts dofa through the model's final norm layer on a square "
+                "or point region, which is a different vector from the one saved here; the saved "
+                "one is what the head was trained on. If both numbers are in play, report them "
+                "as two recipes rather than reconciling them.")
+        out["validation"] = {m: {k: head_score[m].get(k) for k in ("score", "score_name", "n")}
+                             for m in usable if m in head_score}
+        out["note"] = ("Scored the vectors already saved for this region, so no imagery was "
+                       "fetched and no Earth Engine quota was spent. Quote each head's own "
+                       "validation score with the prediction — a confident number from a weak "
+                       "head is still a weak number — and read out any "
+                       "`outside_training_domain` entry, because the heads cannot tell they are "
+                       "being asked about another year or another place.")
+        return json.dumps(out)
+
     def align_embedding_colors(file_ids: List[str], model: Optional[str] = None,
                                names: Optional[List[str]] = None) -> str:
         """Re-colour several already-embedded regions on ONE shared PCA basis, so the colours
@@ -791,6 +959,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         StructuredTool.from_function(func=align_embedding_colors, name="align_embedding_colors", metadata=meta),
         StructuredTool.from_function(func=list_prediction_heads, name="list_prediction_heads", metadata=meta),
         StructuredTool.from_function(func=predict_for_region, name="predict_for_region", metadata=meta),
+        StructuredTool.from_function(func=predict_from_package, name="predict_from_package", metadata=meta),
     ]
 
 
