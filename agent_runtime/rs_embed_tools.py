@@ -400,6 +400,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                      name: Optional[str] = None) -> str:
         """Embed a RECTANGLE with remote-sensing foundation models and PUT THE RESULT ON THE MAP.
 
+        This is also the entry point for SEGMENTATION into look-alike zones, CHANGE DETECTION
+        between periods, per-pixel similarity and land-cover-style clustering: there is no separate
+        tool for those, and each is written in code over the embedding package this saves — see
+        COMPOSING FROM THE PACKAGE below.
+
         NAMED US AREA? Do not use this. "the embedding of Urbana" / "of Champaign County"
         wants the administrative boundary, and this tool embeds a box around a point — it
         takes in everything outside the city limits along with it. Call
@@ -425,14 +430,24 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
             grid__<model>    (D, H, W) float32 — the per-pixel embedding, north-up (row 0 = maxlat)
             pooled__<model>  (D,) float32      — one vector for the whole region
-            meta             JSON string       — per-model grid_hw, grid_stride, grid_saved_hw
+            meta             0-d ndarray of JSON — read it as json.loads(str(z["meta"])); plain
+                             json.loads(z["meta"]) raises TypeError
 
-        `grid_stride` > 1 means the grid is every Nth cell of grid_hw, so quote resolution from
-        grid_saved_hw, not grid_hw. Then: k-means over the pixel axis for look-alike zones,
-        1 - cosine between two periods' pooled vectors for how much a place changed, per-pixel
-        cosine for WHERE it changed. Deliver a rendered result with add_raster_layer using this
-        call's `region_bbox` as its bounds, or polygonize and use add_map_layer to get a legend
-        and clickable zones.
+        meta["models"] is a LIST, one entry per model, and grid_hw / grid_stride / grid_saved_hw
+        are fields of that ENTRY, not of meta itself. A `grid_stride` above 1 means the saved grid
+        is every Nth cell of the native grid_hw, so quote resolution from that entry's
+        grid_saved_hw (equivalently grid__<model>.shape[1:]) and never from grid_hw.
+
+        Then: k-means over the pixel axis for look-alike zones, 1 - cosine between two periods'
+        pooled vectors for how much a place changed, per-pixel cosine for WHERE it changed.
+
+        To deliver it, either polygonize and use add_map_layer — which gets a legend and clickable
+        zones, and is the better answer when the classes matter — or save the array AS AN IMAGE and
+        drape it with add_raster_layer, passing this call's `region_bbox` as bounds. For that
+        second route the PNG must be the pixels themselves, one image pixel per grid cell:
+        PIL.Image.fromarray(rgb).save(...) or plt.imsave(...). A matplotlib FIGURE is the wrong
+        thing to drape — axes, margins, titles and a colorbar all become part of the layer, and
+        the pixels no longer line up with the bounds, so the whole map is silently misregistered.
 
         Two things to say rather than let the map imply them: clusters are unlabelled, so the same
         number means nothing across separate runs, and a distance says THAT a place changed, not
@@ -501,15 +516,30 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 info.update({"file_id": rec["file_id"], "filename": rec.get("filename"),
                              "download_url": rec.get("download_url"),
                              "size_bytes": rec.get("size_bytes")})
-            # The service caps which grids go into the export (300x300 cells). Say so: a
-            # missing full-resolution grid is otherwise invisible until someone loads the file.
+            else:
+                # The package is the ONLY input to every composed operation — segmentation,
+                # change, prediction — so losing it removes those capabilities for the turn.
+                # Silence here read as "there is no package", and the model would go on to
+                # describe clustering it could not do.
+                info["unavailable"] = (
+                    "the embedding ran, but its vector package could not be fetched from the "
+                    "service, so there is no file to compose from")
+                info["consequence"] = (
+                    "clustering, change detection and prediction all need this file. Say the "
+                    "map layer is here but the per-pixel work is not available this turn — do "
+                    "not describe zones or distances you could not compute.")
+            # A grid too large for the export budget is DECIMATED now, not dropped, so a model
+            # missing from grids_saved means the export genuinely failed for it rather than that
+            # the region was too big.
             dropped = [m["model"] for m in summaries
                        if m["model"] not in (pkg.get("grids_saved") or [])]
             if dropped:
-                info["full_grid_omitted_for"] = dropped
-                info["why"] = ("the per-model grid exceeded the export cap (300x300 cells), so the "
-                               "file holds the pooled vector only — enough for similarity, "
-                               "prediction and comparison, not for per-pixel work")
+                info["grid_missing_for"] = dropped
+                info["why"] = ("no per-pixel grid came back for these models, so the file holds "
+                               "their pooled vector only — enough for similarity, prediction and "
+                               "comparison, not for per-pixel work. An oversized grid is "
+                               "decimated rather than dropped (the manifest gives grid_stride), "
+                               "so this is an export failure, not a size limit.")
             out["embedding_package"] = info
         # One descriptor per model; the client stacks them and the layer list toggles between.
         if layers:

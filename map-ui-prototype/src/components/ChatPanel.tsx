@@ -77,9 +77,13 @@ function rsActions(models: string[], year: string, season: string) {
   const sn = RS_SEASONS.find((s) => s.id === season) || RS_SEASONS[0];
   const when = sn.phrase(year);
   const changeYears = rsChangeYears(year);
-  // Only Embed takes several: embed_region is the one tool with a list-shaped `models`
-  // (rs_embed_tools.py:356) and returns one layer per model. segment/predict/change all take a
-  // scalar, so the rest read the first pick.
+  // Only Embed takes several, and the reason is real rather than historical: embed_region sends
+  // the whole list to /api/embed in ONE request and gets a layer back per model. The other three
+  // are composed from ONE embedding — clustering it, differencing it across periods, running a
+  // head on it — and each of those is defined against a single latent space, so a second model
+  // would mean a second, separate analysis rather than a richer one. The rest read the first pick.
+  // (There are no segment/change/predict tools to check against; see the composition contract in
+  // embed_region's docstring.)
   const model = models[0] || 'gse';
   const many = models.length > 1;
   const modelList = listJoin(models);
