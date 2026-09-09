@@ -1805,7 +1805,11 @@ def test_decider_knows_embedding_is_analyze_not_search():
     assert out == "analyze"
     p = seen["prompt"]
     assert "remote-sensing foundation-model embeddings" in p
-    assert "ARGUMENTS to those" in p and "not datasets to retrieve" in p
+    # The claim, not its wording: model names are arguments, not things to go and find.
+    assert "ARGUMENTS" in p and "not datasets to retrieve" in p
+    # And the router must say the operations are COMPOSED, or it hands the peer work as though
+    # a one-shot segment/change/predict tool were still there to call.
+    assert "execute_code" in p and "no one-shot segment/change/predict tool" in p
 
 
 def test_analysis_hints_cover_embedding_vocabulary():

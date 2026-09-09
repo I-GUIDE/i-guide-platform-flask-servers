@@ -141,7 +141,7 @@ def test_the_capability_inventory_covers_the_embedding_surface():
     inv = collect_capability_inventory(include_mcp_tools=False)
     entries = inv if isinstance(inv, list) else inv.get("tools", [])
     names = {e["name"] for e in entries}
-    for want in ("embed_region", "embed_zones", "fit_zone_model", "predict_for_region",
+    for want in ("embed_region", "embed_zones", "fit_zone_model", "predict_from_package",
                  "admin_boundary", "execute_code"):
         assert want in names, f"{want} is bound by every peer but invisible to the user"
 
@@ -336,3 +336,26 @@ def test_both_build_paths_apply_the_filter():
     assert "_is_unbound_mcp_tool(remote_name)" in remote
     assert "_is_unbound_mcp_tool(func.__name__)" in factory
 
+
+def test_the_canned_rs_operations_stay_removed():
+    """Segmentation, change and prediction-by-region are COMPOSED from embed_region's package
+    now, not one-shot tools. Re-adding one quietly would put the agent back to four fixed
+    operations, which is the thing this replaced — so the absence is asserted, not assumed."""
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    names = {str(getattr(t, "name", "")) for t in make_rs_embed_tools()}
+    for gone in ("segment_region", "embedding_change", "predict_for_region"):
+        assert gone not in names, f"{gone} came back; compose it from embed_region instead"
+    # ...and the primitives that pay for them are present.
+    assert {"embed_region", "predict_from_package"} <= names
+
+
+def test_embed_region_says_how_to_compose_from_its_package():
+    """Without this the plumbing works and the model has no reason to know it does: nothing else
+    tells it that a TOOL's file_id can be staged into execute_code, or what is inside the .npz."""
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    doc = next(t for t in make_rs_embed_tools()
+               if str(getattr(t, "name", "")) == "embed_region").description or ""
+    for want in ("input_files", "grid__", "pooled__", "grid_stride", "add_raster_layer"):
+        assert want in doc, f"embed_region's description never mentions {want}"

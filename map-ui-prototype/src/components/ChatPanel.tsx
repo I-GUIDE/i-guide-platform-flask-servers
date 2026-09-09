@@ -96,19 +96,22 @@ function rsActions(models: string[], year: string, season: string) {
         // list is what turns the stack into something navigable with the layer-list eye toggles.
         ? `Embed this drawn region with the ${modelList} models for ${when}, put each model's embedding on the map as its own layer, and list them — they cover the same ground, so only the top one is visible until I toggle the rest.`
         : `Embed this drawn region with the ${model} model for ${when} and put the embedding on the map.` },
+    // Every operation below the first is COMPOSED from the embedding rather than naming a
+    // one-shot tool, because those tools no longer exist: the agent embeds, then writes the
+    // clustering / differencing / prediction against the package in code. The questions are
+    // worded as outcomes, not as tool calls, so they keep working as the composition changes.
     { label: 'Segment',
-      prompt: `Segment this drawn region into 6 look-alike zones from its ${model} satellite embedding for ${when}, and show it on the map.` },
-    // Composed from embed_region rather than asking for embedding_change, which returns a CSV
-    // and NO layer and throws its per-year embeddings away — its own note says it tells you THAT
-    // the place changed, not what changed. Embedding each year instead puts all three on the map
-    // (start/end are part of the layer id, so they do not collide), leaves reusable packages
-    // behind, and makes the change readable as colour change. Here a shared basis IS meaningful:
-    // one model, one space, and align_embedding_colors already numbers same-region repeats.
-    // It also costs nothing extra — /api/change embeds once per year too.
+      prompt: `Embed this drawn region with the ${model} model for ${when}, then cluster that embedding into 6 look-alike zones and put the zones on the map.` },
+    // Composed rather than asking for a change tool, which returned a CSV and NO layer and threw
+    // its per-year embeddings away — it told you THAT the place changed, not what changed.
+    // Embedding each year instead puts them all on the map (start/end are part of the layer id,
+    // so they do not collide), leaves reusable packages behind, and makes the change readable as
+    // colour change. Here a shared basis IS meaningful: one model, one space, and
+    // align_embedding_colors already numbers same-region repeats.
     { label: 'Change',
       prompt: `Embed this drawn region with the ${model} model for ${sn.over(listJoin(changeYears))}, put each year's embedding on the map on one shared colour basis, and work out from them how much the region changed year to year.` },
     { label: 'Predict',
-      prompt: `Run the available pretrained heads on this drawn region using ${model} embeddings for ${when}, and report the predictions with their validation scores.` },
+      prompt: `Embed this drawn region with the ${model} model for ${when}, then run whatever pretrained heads cover ${model} on that embedding and report each prediction with its validation score. If no head covers ${model}, say so and tell me which models do.` },
   ];
 }
 
