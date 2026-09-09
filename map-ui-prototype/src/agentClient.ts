@@ -106,6 +106,20 @@ export interface MapLayerEvent {
   total?: number;               // full population size when sampled
   bounds?: [number, number, number, number];  // raster footprint [minLon,minLat,maxLon,maxLat]
   opacity?: number;             // raster draping opacity
+  // The vectors this picture was made FROM. An embedding raster is a 3-colour projection and
+  // answers nothing by itself; every later question about it ("predict from this layer",
+  // "compare it with that one") needs the real package. Carried on the layer so it survives
+  // into the session store and outlives the turn that produced it.
+  embedding?: EmbeddingRef;
+}
+
+export interface EmbeddingRef {
+  file_id: string;
+  filename?: string;
+  model?: string;               // which model inside the package this layer draws
+  months?: string;
+  models_in_package?: string[];
+  recoloured_on_shared_basis?: boolean;
 }
 
 export interface StreamResult {

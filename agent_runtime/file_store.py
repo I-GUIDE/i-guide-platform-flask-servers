@@ -7,7 +7,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from werkzeug.datastructures import FileStorage
@@ -261,6 +261,74 @@ def resolve_file_id(file_id: str) -> Path:
     return path
 
 
+def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
+               kind: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    """Stored file records, newest first, optionally narrowed by name / extension / kind.
+
+    A ``file_id`` has been the store's only handle, and a ``file_id`` is exactly what a later
+    turn does not have: an answer surfaces an artifact by FILENAME with a download link, and the
+    id survives only in the process-local action ledger, which a restart discards. So a turn
+    asked to "predict from the package you saved for Champaign" had no way to reach a file it
+    could plainly see. This is the lookup that closes that gap.
+
+    ``name`` matches as a case-insensitive substring, so a filename remembered imprecisely still
+    finds its file. Ordering is by mtime, because records carry no timestamp of their own; ties
+    break on file_id so the result is deterministic.
+
+    There is no index — records are one json file each — so this scans the metadata directory,
+    which is the same scan ``create_output_file_from_path`` already does to honour ``overwrite``.
+    """
+    needle = (name or "").strip().lower()
+    want_suffix = (suffix or "").strip().lower()
+    out: List[Dict[str, Any]] = []
+    for meta_path in _metadata_dir().glob("*.json"):
+        try:
+            record = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a half-written record must not break the lookup
+            continue
+        filename = str(record.get("filename") or "")
+        if kind and str(record.get("kind") or "") != kind:
+            continue
+        if want_suffix and not filename.lower().endswith(want_suffix):
+            continue
+        if needle and needle not in filename.lower():
+            continue
+        try:
+            path = _record_path(record)
+            if not path.exists():
+                continue
+            stamped = {**record, "_mtime": path.stat().st_mtime}
+        except Exception:  # noqa: BLE001
+            continue
+        out.append(stamped)
+    out.sort(key=lambda r: (r.get("_mtime") or 0, str(r.get("file_id"))), reverse=True)
+    return [_with_public_url({k: v for k, v in r.items() if k != "_mtime"})
+            for r in out[:max(1, int(limit))]]
+
+
+def resolve_file_ref(ref: str, *, suffix: Optional[str] = None
+                     ) -> Tuple[Path, Dict[str, Any], List[Dict[str, Any]]]:
+    """A path for a file named either by its ``file_id`` or by its filename.
+
+    Returns the path, the record it resolved to, and any OTHER records that matched the same
+    name. The caller is expected to say which one it used whenever that list is non-empty:
+    "the Champaign package" can legitimately name several files, and silently taking the newest
+    would be a guess reported as a fact.
+    """
+    text = str(ref or "").strip()
+    if not text:
+        raise ValueError("no file_id or filename given")
+    try:
+        return resolve_file_id(text), require_file_record(text), []
+    except Exception:  # noqa: BLE001 - not an id, so try it as a name
+        pass
+    matches = find_files(name=text, suffix=suffix)
+    if not matches:
+        raise ValueError(f"no stored file matches {text!r}")
+    first = matches[0]
+    return resolve_file_id(str(first["file_id"])), first, matches[1:]
+
+
 def _write_record(record: Dict[str, Any]) -> Dict[str, Any]:
     _metadata_path(record["file_id"]).write_text(json.dumps(record, ensure_ascii=True, indent=2), encoding="utf-8")
     return record
@@ -398,6 +466,8 @@ def create_output_file_from_path(
 __all__ = [
     "create_output_file",
     "create_output_file_from_path",
+    "find_files",
+    "resolve_file_ref",
     "get_file_record",
     "maybe_sweep_expired_files",
     "require_file_record",

@@ -35,6 +35,9 @@ RS_EMBED_URL = os.getenv("RS_EMBED_URL", "http://localhost:8077").rstrip("/")
 _TIMEOUT_S = float(os.getenv("RS_EMBED_TIMEOUT_S", "600"))
 _DEFAULT_BUFFER_M = 2048          # matches the service's own point footprint
 _MAX_MODELS_PER_CALL = 5
+# How many saved packages list_embedding_packages will describe. Each one costs opening its .npz
+# to read the manifest, and a listing long enough to need scrolling is not an answer anyway.
+_PACKAGE_LIST_MAX = 15
 
 
 def _svc(path: str, payload: Optional[Dict[str, Any]] = None, *, method: str = "POST",
@@ -239,16 +242,26 @@ def _save_png(data_uri: str, stem: str) -> Optional[Dict[str, Any]]:
 
 
 def _raster_layer(rec: Dict[str, Any], bbox: List[float], label: str,
-                  layer_id: Optional[str] = None, opacity: float = 0.85) -> Dict[str, Any]:
+                  layer_id: Optional[str] = None, opacity: float = 0.85,
+                  embedding: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """A ``map_layer`` descriptor the client drapes as a georeferenced image.
 
     ``layer_id`` is the layer's identity and should always be given: without it the id falls
     back to a slug of ``label``, which is a display string and moves when the wording does.
+
+    ``embedding`` points at the vectors the picture was made FROM — the saved package, and which
+    model inside it this layer draws. The raster is a 3-colour projection and answers nothing on
+    its own; every later question about the layer ("predict from it", "compare it with that
+    one") needs the real vectors. Carrying the pointer on the layer is what lets a later turn
+    reach them: the id lives only in the process-local ledger otherwise, and the visible answer
+    carries just a filename.
     """
     out = {"url": rec.get("download_url"), "label": label, "render": "raster",
            "bounds": bbox, "opacity": opacity, "source": "analysis"}
     if layer_id:
         out["id"] = layer_id
+    if embedding:
+        out["embedding"] = embedding
     return out
 
 
@@ -436,6 +449,9 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             return json.dumps({"ok": False, **res})
 
         layers, summaries, failed = [], [], []
+        # Which model each entry of `layers` draws. The pointer can only be attached once the
+        # package record exists, which is after this loop, and by then `rec` has been rebound.
+        layer_models: List[str] = []
         region_tag = _region_tag(name, box)
         for r in res.get("results") or []:
             model = str(r.get("model"))
@@ -458,6 +474,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                     rec, box, _layer_label(f"{model} embedding (PCA-RGB)", region_tag),
                     _layer_id("pca", _region_tag(None, box), bbox=_round_bbox(box),
                               model=model, start=start, end=end)))
+                layer_models.append(model)
             summaries.append(entry)
 
         pkg = res.get("package") or {}
@@ -481,6 +498,13 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 info.update({"file_id": rec["file_id"], "filename": rec.get("filename"),
                              "download_url": rec.get("download_url"),
                              "size_bytes": rec.get("size_bytes")})
+                # Each raster now says which vectors it came from and which model inside them
+                # it draws, so "predict from that layer" is answerable in a later turn.
+                for descriptor, layer_model in zip(layers, layer_models):
+                    descriptor["embedding"] = {
+                        "file_id": rec["file_id"], "filename": rec.get("filename"),
+                        "model": layer_model, "months": f"{start}..{end}",
+                        "models_in_package": pkg.get("models") or []}
             # The service caps which grids go into the export (300x300 cells). Say so: a
             # missing full-resolution grid is otherwise invisible until someone loads the file.
             dropped = [m["model"] for m in summaries
@@ -638,19 +662,81 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                                    "quote it, because a confident number from a weak head is "
                                    "still a weak number."})
 
-    def predict_from_package(file_id: str) -> str:
+    def list_embedding_packages() -> str:
+        """List the embedding packages ALREADY SAVED in this session, newest first.
+
+        Every embed_region call saves the real vectors as an .npz. This says which ones exist,
+        for which region and months, and which models each holds — so an embedding made in an
+        earlier turn can be reused instead of paying for the region again. Use it whenever the
+        user refers to an embedding, a layer or a region that was worked on earlier and the
+        file_id is not to hand; then pass the file_id to predict_from_package or
+        align_embedding_colors.
+
+        `has_head` says whether a pretrained head exists for that model, so a package that
+        cannot be predicted from is visible as such before anything is attempted.
+        """
+        from agent_runtime import rs_embed_head_domain as domain
+        from agent_runtime.file_store import find_files, resolve_file_id
+
+        records = find_files(suffix=".npz", limit=_PACKAGE_LIST_MAX)
+        if not records:
+            return json.dumps({
+                "ok": True, "packages": [], "count": 0,
+                "note": "No embedding package has been saved. embed_region saves one each time "
+                        "it runs; until then there is nothing to reuse."})
+
+        # Best effort: the listing is still useful when the service is down, and saying "no head"
+        # because the service was unreachable would be a false negative about the data.
+        heads = _svc("/api/heads", method="GET")
+        with_head = ({str(h.get("model")) for h in (heads.get("models") or [])}
+                     if not heads.get("error") else None)
+
+        packages = []
+        for rec in records:
+            try:
+                path = resolve_file_id(str(rec.get("file_id")))
+                vectors, _problems = domain.pooled_vectors(path)
+                manifest = domain.read_manifest(path)
+            except Exception:  # noqa: BLE001 - an unreadable package is listed, not fatal
+                vectors, manifest = {}, {}
+            entry = {"file_id": rec.get("file_id"), "filename": rec.get("filename"),
+                     "models": sorted(vectors) or None,
+                     "size_bytes": rec.get("size_bytes")}
+            entry.update(domain.package_region(manifest))
+            if with_head is not None and vectors:
+                entry["has_head"] = sorted(set(vectors) & with_head) or []
+            packages.append({k: v for k, v in entry.items() if v not in (None, "")})
+
+        return json.dumps({
+            "ok": True, "count": len(packages), "packages": packages,
+            "showing": f"the {len(packages)} most recently saved"
+                       if len(records) >= _PACKAGE_LIST_MAX else "all of them",
+            "note": "Pass a file_id from here to predict_from_package to score an embedding "
+                    "already paid for, or to align_embedding_colors to make two regions' "
+                    "colours comparable. Neither re-embeds.",
+        })
+
+    def predict_from_package(file_id: str, models: Optional[List[str]] = None) -> str:
         """Run the pretrained heads on an embedding you ALREADY have — no re-embedding.
 
-        Pass the `embedding_package.file_id` from an embed_region result, from this turn or any
-        earlier one. The heads are trained weights that live on the service and are never
-        exported, so this is the only route to them from here, but the EMBEDDING is already
-        paid for: this fetches no imagery, spends no Earth Engine quota, and answers in
-        milliseconds instead of minutes. Use it whenever a region has already been embedded —
-        including when embedding is failing, since this path does not need Earth Engine at all.
+        `file_id` takes EITHER the `embedding_package.file_id` from an embed_region result — from
+        this turn or any earlier one — OR the package's filename, which is what an earlier answer
+        surfaced if the id is no longer to hand ("downtown_champaign_1_km_box_vectors.npz", or
+        just "champaign"). A layer on the map carries its own pointer in `embedding.file_id`, so
+        "predict from that layer" resolves through the same argument. When a name matches more
+        than one package the newest is used and the result lists the others under `also_matched`
+        — say which one you used. list_embedding_packages shows what is there.
+
+        The heads are trained weights that live on the service and are never exported, so this is
+        the only route to them from here, but the EMBEDDING is already paid for: this fetches no
+        imagery, spends no Earth Engine quota, and answers in milliseconds instead of minutes.
+        Use it whenever a region has already been embedded — including when embedding is failing,
+        since this path does not need Earth Engine at all.
 
         It scores the package's own pooled vectors, which is the same grid-then-average recipe
-        the heads were trained on. Call list_prediction_heads first: coverage is narrow, and
-        the result says plainly which models in the package have no head.
+        the heads were trained on. Call list_prediction_heads first: coverage is narrow, and the
+        result says plainly which models in the package have no head. `models` narrows the run to
+        particular models in the package — pass one layer's model to score just that layer.
 
         This is ONE estimate for the whole region, not a per-pixel map, and the heads were
         fitted on a single crop in one state in one year. The result carries an
@@ -658,20 +744,22 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         rather than quoting the probability alone.
         """
         from agent_runtime import rs_embed_head_domain as domain
-        from agent_runtime.file_store import resolve_file_id
+        from agent_runtime.file_store import resolve_file_ref
 
         fid = str(file_id or "").strip()
         if not fid:
-            return json.dumps({"ok": False, "error": "no file_id given",
+            return json.dumps({"ok": False, "error": "no file_id or filename given",
                                "hint": "Pass embedding_package.file_id from an embed_region "
-                                       "result."})
+                                       "result, a layer's embedding.file_id, or the package's "
+                                       "filename. list_embedding_packages shows what exists."})
         try:
-            path = resolve_file_id(fid)
+            path, record, alternatives = resolve_file_ref(fid, suffix=".npz")
         except Exception as exc:  # noqa: BLE001
             return json.dumps({
                 "ok": False, "error": f"cannot resolve {fid!r}: {type(exc).__name__}: {exc}"[:300],
-                "hint": "Pass embedding_package.file_id from an embed_region result — the .npz, "
-                        "not the PNG and not the map layer."})
+                "hint": "Accepts a file_id, a layer's embedding.file_id, or the package's "
+                        "filename. Call list_embedding_packages to see the saved packages with "
+                        "their regions and months, then pass one of those file_ids."})
 
         if not str(path).lower().endswith(".npz"):
             # A CSV is almost always embed_zones output, and the steer for it is a different
@@ -709,6 +797,17 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         # package for a model with no head never travels at all.
         head_dim = {str(h.get("model")): h.get("dim") for h in (heads.get("models") or [])}
         head_score = {str(h.get("model")): h for h in (heads.get("models") or [])}
+
+        wanted = {str(m).strip().lower() for m in (models or []) if str(m).strip()}
+        if wanted:
+            missing = sorted(wanted - {m.lower() for m in vectors})
+            vectors = {m: v for m, v in vectors.items() if m.lower() in wanted}
+            if not vectors:
+                return json.dumps({
+                    "ok": False,
+                    "error": f"this package holds no vectors for {', '.join(missing)}",
+                    "hint": "Pass no `models` to score everything in the package, or one of the "
+                            "models it does hold."})
 
         usable: List[str] = []
         not_scored: List[Dict[str, Any]] = []
@@ -748,7 +847,16 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             return json.dumps({"ok": False, **res})
 
         manifest = domain.read_manifest(path)
-        out: Dict[str, Any] = {"ok": True, "package_file_id": fid, "scored_models": usable}
+        out: Dict[str, Any] = {"ok": True,
+                               "package_file_id": str(record.get("file_id") or fid),
+                               "package_filename": record.get("filename"),
+                               "scored_models": usable}
+        # A name can legitimately match several packages. Naming the losers is what stops the
+        # answer from presenting a guess about WHICH region was scored as a settled fact.
+        if alternatives:
+            out["also_matched"] = [{"file_id": a.get("file_id"), "filename": a.get("filename")}
+                                   for a in alternatives[:5]]
+            out["resolved_by"] = f"newest package whose name matches {fid!r}"
         # Region and months come back onto the result because this tool takes no bbox argument:
         # without them neither the answer nor the action ledger records WHAT was predicted.
         out.update(domain.package_region(manifest))
@@ -935,7 +1043,12 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 # the per-call dedup dropped the second before it left the process.
                 _layer_id("sharedpca", _region_tag(None, bbox),
                           package=str(entry["file_id"]), bbox=_round_bbox(bbox),
-                          model=model, basis=fitted_basis)))
+                          model=model, basis=fitted_basis),
+                # A re-coloured raster points at the SAME vectors as the layer it replaces —
+                # only the colours were refitted — so the pointer has to survive the re-render
+                # or aligning the colours would cost the layer its data.
+                embedding={"file_id": str(entry["file_id"]), "model": model,
+                           "recoloured_on_shared_basis": True}))
             regions.append({"file_id": entry["file_id"], "label": tag, "bbox": bbox,
                             "grid": [h, w], "image_file_id": rec["file_id"],
                             "download_url": rec.get("download_url")})
@@ -974,6 +1087,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         StructuredTool.from_function(func=compare_regions, name="compare_regions", metadata=meta),
         StructuredTool.from_function(func=align_embedding_colors, name="align_embedding_colors", metadata=meta),
         StructuredTool.from_function(func=list_prediction_heads, name="list_prediction_heads", metadata=meta),
+        StructuredTool.from_function(func=list_embedding_packages, name="list_embedding_packages", metadata=meta),
         StructuredTool.from_function(func=predict_for_region, name="predict_for_region", metadata=meta),
         StructuredTool.from_function(func=predict_from_package, name="predict_from_package", metadata=meta),
     ]

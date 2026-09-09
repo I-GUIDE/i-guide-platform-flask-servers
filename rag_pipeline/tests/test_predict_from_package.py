@@ -239,9 +239,12 @@ def tool(monkeypatch):
 
 
 def _point_at(monkeypatch, path):
+    """Stand in for the store: the tool resolves a reference, not a bare id."""
     from agent_runtime import file_store
 
-    monkeypatch.setattr(file_store, "resolve_file_id", lambda fid: Path(path))
+    record = {"file_id": "file_abc", "filename": Path(path).name}
+    monkeypatch.setattr(file_store, "resolve_file_ref",
+                        lambda ref, *, suffix=None: (Path(path), record, []))
 
 
 def test_the_tool_scores_a_saved_package(tool, tmp_path, monkeypatch):
@@ -324,11 +327,165 @@ def test_an_unresolvable_file_id_says_what_to_pass(tool, tmp_path, monkeypatch):
 
     fn, calls = tool
 
-    def boom(fid):
-        raise ValueError(f"file for file_id does not exist: {fid}")
+    def boom(ref, *, suffix=None):
+        raise ValueError(f"no stored file matches {ref!r}")
 
-    monkeypatch.setattr(file_store, "resolve_file_id", boom)
+    monkeypatch.setattr(file_store, "resolve_file_ref", boom)
     out = json.loads(fn("file_missing"))
     assert out["ok"] is False
-    assert "embedding_package.file_id" in out["hint"]
+    assert "list_embedding_packages" in out["hint"]
     assert calls["uploads"] == []
+
+
+# --- addressing: reaching a package a later turn can only NAME ------------------
+@pytest.fixture()
+def store(tmp_path, monkeypatch):
+    """An isolated file store, so the lookup is tested against records we planted."""
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path / "store"))
+    from agent_runtime import file_store
+
+    return file_store
+
+
+def _save(store, tmp_path, name, **kw):
+    path = _package(tmp_path, name=name, **kw)
+    return store.create_output_file_from_path(path, filename=name)
+
+
+def test_find_files_matches_a_partial_name(store, tmp_path):
+    _save(store, tmp_path, "downtown_champaign_1_km_box_vectors.npz")
+    _save(store, tmp_path, "urbana_vectors.npz")
+    hits = store.find_files(name="champaign", suffix=".npz")
+    assert [h["filename"] for h in hits] == ["downtown_champaign_1_km_box_vectors.npz"]
+
+
+def test_find_files_filters_by_extension(store, tmp_path):
+    _save(store, tmp_path, "region_vectors.npz")
+    csv = tmp_path / "zone_vectors.csv"
+    csv.write_text("zone_id,e000\n1,0.5\n")
+    store.create_output_file_from_path(csv, filename="zone_vectors.csv")
+    assert [h["filename"] for h in store.find_files(suffix=".npz")] == ["region_vectors.npz"]
+
+
+def test_find_files_returns_newest_first(store, tmp_path):
+    import os
+    import time
+
+    old = _save(store, tmp_path, "older_vectors.npz")
+    new = _save(store, tmp_path, "newer_vectors.npz")
+    # mtime is the only ordering signal the records carry, so set it explicitly rather than
+    # relying on the two writes landing in different clock ticks.
+    os.utime(store.resolve_file_id(old["file_id"]), (time.time() - 500, time.time() - 500))
+    ids = [h["file_id"] for h in store.find_files(suffix=".npz")]
+    assert ids[0] == new["file_id"]
+    assert old["file_id"] in ids
+
+
+def test_resolve_file_ref_takes_an_id_or_a_name(store, tmp_path):
+    rec = _save(store, tmp_path, "champaign_vectors.npz")
+    by_id, record_a, alts_a = store.resolve_file_ref(rec["file_id"])
+    by_name, record_b, _alts_b = store.resolve_file_ref("champaign", suffix=".npz")
+    assert by_id == by_name
+    assert record_a["file_id"] == record_b["file_id"]
+    assert alts_a == []
+
+
+def test_resolve_file_ref_reports_the_packages_it_did_not_pick(store, tmp_path):
+    import os
+    import time
+
+    first = _save(store, tmp_path, "champaign_june_vectors.npz")
+    _save(store, tmp_path, "champaign_july_vectors.npz")
+    os.utime(store.resolve_file_id(first["file_id"]), (time.time() - 500, time.time() - 500))
+    _path, record, alternatives = store.resolve_file_ref("champaign", suffix=".npz")
+    assert record["filename"] == "champaign_july_vectors.npz"
+    assert [a["filename"] for a in alternatives] == ["champaign_june_vectors.npz"]
+
+
+def test_resolve_file_ref_raises_when_nothing_matches(store, tmp_path):
+    _save(store, tmp_path, "champaign_vectors.npz")
+    with pytest.raises(ValueError):
+        store.resolve_file_ref("bavaria", suffix=".npz")
+
+
+# --- the layer carries its own vectors -----------------------------------------
+def test_a_raster_descriptor_can_point_at_its_vectors():
+    from agent_runtime.rs_embed_tools import _raster_layer
+
+    plain = _raster_layer({"download_url": "/f/1"}, [0, 0, 1, 1], "l", "id-1")
+    assert "embedding" not in plain
+    pointed = _raster_layer({"download_url": "/f/1"}, [0, 0, 1, 1], "l", "id-1",
+                            embedding={"file_id": "file_abc", "model": "gse"})
+    assert pointed["embedding"] == {"file_id": "file_abc", "model": "gse"}
+
+
+# --- the tool, addressed by name and narrowed by model -------------------------
+def test_the_tool_accepts_a_filename(tool, store, tmp_path, monkeypatch):
+    fn, calls = tool
+    rec = _save(store, tmp_path, "downtown_champaign_vectors.npz")
+    out = json.loads(fn("downtown_champaign_vectors.npz"))
+    assert out["ok"] is True
+    assert out["package_file_id"] == rec["file_id"]
+    assert out["package_filename"] == "downtown_champaign_vectors.npz"
+    assert calls["uploaded_keys"] == ["meta", "pooled__gse"]
+
+
+def test_the_tool_names_the_packages_it_did_not_use(tool, store, tmp_path, monkeypatch):
+    import os
+    import time
+
+    fn, _calls = tool
+    first = _save(store, tmp_path, "champaign_june_vectors.npz")
+    _save(store, tmp_path, "champaign_july_vectors.npz")
+    os.utime(store.resolve_file_id(first["file_id"]), (time.time() - 500, time.time() - 500))
+    out = json.loads(fn("champaign"))
+    assert out["package_filename"] == "champaign_july_vectors.npz"
+    assert [a["filename"] for a in out["also_matched"]] == ["champaign_june_vectors.npz"]
+    assert "champaign" in out["resolved_by"]
+
+
+def test_models_narrows_the_run_to_one_layer(tool, store, tmp_path, monkeypatch):
+    fn, calls = tool
+    _save(store, tmp_path, "three_vectors.npz",
+          pooled={"gse": np.arange(64, dtype=np.float32),
+                  "satmae": np.arange(1024, dtype=np.float32)})
+    out = json.loads(fn("three_vectors.npz", ["satmae"]))
+    assert out["scored_models"] == ["satmae"]
+    assert calls["uploaded_keys"] == ["meta", "pooled__satmae"]
+
+
+def test_an_unknown_model_filter_says_what_the_package_holds(tool, store, tmp_path):
+    fn, calls = tool
+    _save(store, tmp_path, "one_vectors.npz")
+    out = json.loads(fn("one_vectors.npz", ["clay"]))
+    assert out["ok"] is False
+    assert "clay" in out["error"]
+    assert calls["uploads"] == []
+
+
+def test_listing_shows_saved_packages_with_where_and_when(tool, store, tmp_path, monkeypatch):
+    from agent_runtime import rs_embed_tools
+
+    _save(store, tmp_path, "champaign_vectors.npz")
+    monkeypatch.setattr(rs_embed_tools, "_svc",
+                        lambda path, payload=None, *, method="POST", timeout=None: dict(HEADS))
+    listing = {t.name: t for t in rs_embed_tools.make_rs_embed_tools()}["list_embedding_packages"]
+    out = json.loads(listing.func())
+    assert out["ok"] is True and out["count"] == 1
+    pkg = out["packages"][0]
+    assert pkg["filename"] == "champaign_vectors.npz"
+    assert pkg["models"] == ["gse"]
+    assert pkg["months"] == "2022-06..2022-09"
+    assert pkg["region_bbox"] == [-88.265, 40.1, -88.217, 40.137]
+    assert pkg["has_head"] == ["gse"]
+
+
+def test_listing_says_so_when_nothing_has_been_embedded(store, monkeypatch):
+    from agent_runtime import rs_embed_tools
+
+    monkeypatch.setattr(rs_embed_tools, "_svc",
+                        lambda path, payload=None, *, method="POST", timeout=None: dict(HEADS))
+    listing = {t.name: t for t in rs_embed_tools.make_rs_embed_tools()}["list_embedding_packages"]
+    out = json.loads(listing.func())
+    assert out["ok"] is True and out["packages"] == []
+    assert "embed_region saves one" in out["note"]

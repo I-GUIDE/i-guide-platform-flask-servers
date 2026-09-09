@@ -449,6 +449,9 @@ export default function App() {
               kind: 'raster', id: layer.id, source: (layer.source as any) || 'analysis',
               label: layer.label, url: resolveUrl(layer.url), bounds,
               opacity: layer.opacity ?? 0.85, fitBounds: true,
+              // Kept, not dropped: this branch names every field it copies, so a descriptor
+              // field left out here never reaches the layer list or the session store.
+              ...(layer.embedding ? { embedding: layer.embedding } : {}),
             });
             fitView(bboxToFC(bounds));
             addTrace({ text: `map: raster — ${layer.label}`, kind: 'tool' });

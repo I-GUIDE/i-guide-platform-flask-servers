@@ -39,6 +39,16 @@ export type LayerArtifact =
       legend?: Legend[];
       fitBounds?: boolean;
       visible?: boolean;
+      // Pointer to the saved vectors behind the picture, when there are any. Persisted with the
+      // layer, so a session restored tomorrow still knows which package each raster came from.
+      embedding?: {
+        file_id: string;
+        filename?: string;
+        model?: string;
+        months?: string;
+        models_in_package?: string[];
+        recoloured_on_shared_basis?: boolean;
+      };
     }
   | {
       kind: 'geojson';
