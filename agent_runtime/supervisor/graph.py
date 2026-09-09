@@ -293,7 +293,7 @@ _LEDGER_LOG = logging.getLogger(__name__)
 _LEDGER_ARGS = (
     "model", "area", "state", "level", "subdivide", "place", "feature", "query",
     "lon", "lat", "bbox", "start", "end", "year", "file_id", "zone_id_field", "zone_ids",
-    # embed_region / predict_for_region take LISTS; "model"/"year" above miss them entirely.
+    # embed_region takes a LIST of models; "model"/"year" above miss it entirely.
     "models", "years", "buffer_m", "max_tiles", "clusters",
     # WHICH variable, WHICH neighbours, WHICH estimator. Without these,
     # local_moran_lisa(column="income", weights="queen") recorded as
@@ -1809,11 +1809,18 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "- analyze: run a GIS/data analysis workflow with EXISTING purpose-built tools "
             "(QGIS/PyQGIS, overlay/buffer/clip/dissolve, aggregation, temporal analysis, "
             "statistics, vector inspect/plot/reproject) over the evidence or uploaded files. "
-            "It ALSO computes remote-sensing foundation-model embeddings for a map region: "
-            "embedding a drawn area, segmenting it into look-alike zones, measuring how much "
-            "it changed across years, comparing two areas, and running pretrained heads. "
-            "Model names (gse, tessera, prithvi, terrafm, satmae, ...) are ARGUMENTS to those "
-            "tools, not datasets to retrieve — a request naming one is analyze work, not search.\n"
+            "It ALSO computes remote-sensing foundation-model embeddings for a map region, and "
+            "COMPOSES further work from them in code. Embedding an area is a tool (embed_region, "
+            "embed_zones) and it saves a package of the real vectors; clustering that embedding "
+            "into look-alike zones, measuring how much a place changed across years, differencing "
+            "two periods per pixel, or thresholding a similarity surface are then written against "
+            "that package with execute_code and delivered with add_map_layer (polygonized, for a "
+            "legend and clickable zones) or add_raster_layer (the raw pixel array saved as an "
+            "image — never a matplotlib figure, whose axes and margins misregister the layer). "
+            "There is no one-shot segment/change/predict tool — the embedding is the primitive. "
+            "Pretrained heads run on the same package via predict_from_package. "
+            "Model names (gse, tessera, prithvi, terrafm, satmae, ...) are ARGUMENTS, not datasets "
+            "to retrieve — a request naming one is analyze work, not search.\n"
             "- code: produce and run NEW code for work no existing tool covers\n"
             "- done: stop; a grounded final answer is composed automatically from the "
             "conversation + evidence + analysis results + code\n\n"
@@ -2734,8 +2741,8 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
 # than geometry. Filtering to add_map_layer alone left that work with nowhere to put its raster.
 _MAP_DELIVERY_TOOLS = ("add_map_layer", "add_raster_layer")
 
-_MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search",
-                    "embed_region", "segment_region", "embed_zones",
+_MAP_LAYER_TOOLS = ("add_map_layer", "add_raster_layer", "overpass_search", "spatial_search",
+                    "embed_region", "embed_zones",
                     "fit_zone_model", "admin_boundary")
 _WANTS_MAP_RE = re.compile(
     r"\b(?:on|in|onto|to)\s+(?:the\s+|a\s+|my\s+)?(?:interactive\s+)?map\b"
@@ -2827,7 +2834,7 @@ _MODEL_MISMATCH_OBSERVATION = (
     "the embedding tools default their model argument, so leaving it out silently embeds "
     "with something else. Call the embedding tool again naming {wanted} explicitly: "
     "embed_region takes models=['{wanted}'] (a LIST, and it accepts several at once), while "
-    "segment_region and the rest take model='{wanted}'. Then describe the model that actually ran."
+    "embed_zones takes model='{wanted}'. Then describe the model that actually ran."
 )
 
 # An answer that tells the user to add a layer they can already see. The map is delivered as

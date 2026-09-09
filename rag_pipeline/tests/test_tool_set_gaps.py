@@ -141,7 +141,7 @@ def test_the_capability_inventory_covers_the_embedding_surface():
     inv = collect_capability_inventory(include_mcp_tools=False)
     entries = inv if isinstance(inv, list) else inv.get("tools", [])
     names = {e["name"] for e in entries}
-    for want in ("embed_region", "embed_zones", "fit_zone_model", "predict_for_region",
+    for want in ("embed_region", "embed_zones", "fit_zone_model", "predict_from_package",
                  "admin_boundary", "execute_code"):
         assert want in names, f"{want} is bound by every peer but invisible to the user"
 
@@ -336,3 +336,73 @@ def test_both_build_paths_apply_the_filter():
     assert "_is_unbound_mcp_tool(remote_name)" in remote
     assert "_is_unbound_mcp_tool(func.__name__)" in factory
 
+
+def test_the_canned_rs_operations_stay_removed():
+    """Segmentation, change and prediction-by-region are COMPOSED from embed_region's package
+    now, not one-shot tools. Re-adding one quietly would put the agent back to four fixed
+    operations, which is the thing this replaced — so the absence is asserted, not assumed."""
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    names = {str(getattr(t, "name", "")) for t in make_rs_embed_tools()}
+    for gone in ("segment_region", "embedding_change", "predict_for_region"):
+        assert gone not in names, f"{gone} came back; compose it from embed_region instead"
+    # ...and the primitives that pay for them are present.
+    assert {"embed_region", "predict_from_package"} <= names
+
+
+def test_embed_region_says_how_to_compose_from_its_package():
+    """Without this the plumbing works and the model has no reason to know it does: nothing else
+    tells it that a TOOL's file_id can be staged into execute_code, or what is inside the .npz."""
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    doc = next(t for t in make_rs_embed_tools()
+               if str(getattr(t, "name", "")) == "embed_region").description or ""
+    for want in ("input_files", "grid__", "pooled__", "grid_stride", "add_raster_layer"):
+        assert want in doc, f"embed_region's description never mentions {want}"
+
+
+def test_a_lost_embedding_package_is_reported_not_omitted(monkeypatch):
+    """The package is the only input to every composed operation, so losing it removes
+    segmentation, change and prediction for the turn. It used to vanish from the result: the key
+    was simply absent, which reads the same as "no package was made" and lets the answer go on to
+    describe clustering that never happened."""
+    import json as _json
+
+    from agent_runtime import rs_embed_tools as rt
+
+    monkeypatch.setattr(rt, "_svc", lambda path, payload=None, **kw: (
+        {"models": [{"id": "gse"}]} if path == "/api/models" else {
+            "results": [{"model": "gse", "ok": True, "type": "precomputed", "dim": 64,
+                         "grid_hw": [8, 8], "norm": 1.0, "image": ""}],
+            "package": {"models": ["gse"], "grids_saved": ["gse"]},
+            "download_url": "/api/download/pkg.npz"}))
+    monkeypatch.setattr(rt, "_save_png", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "_fetch_package", lambda *a, **k: None)   # the fetch fails
+
+    tool = next(t for t in rt.make_rs_embed_tools()
+                if str(getattr(t, "name", "")) == "embed_region")
+    out = _json.loads(tool.invoke({"bbox": [-88.3, 40.05, -88.2, 40.12], "models": ["gse"]}))
+
+    pkg = out.get("embedding_package") or {}
+    assert "file_id" not in pkg, "nothing was fetched, so there is no file_id to offer"
+    assert pkg.get("unavailable"), "a lost package must SAY so, not just omit the key"
+    assert "compose" in pkg["unavailable"]
+    assert "not available this turn" in (pkg.get("consequence") or "")
+
+
+def test_embed_region_states_the_npz_contract_correctly(monkeypatch):
+    """The contract is what composed code is written against, so a wrong claim in it costs a
+    sandbox run or, worse, a silently mis-scaled result. `meta` is a 0-d ndarray and the stride
+    fields live per-entry under meta["models"] — asserted because the first version of this
+    docstring got both wrong."""
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    doc = next(t for t in make_rs_embed_tools()
+               if str(getattr(t, "name", "")) == "embed_region").description or ""
+    assert 'json.loads(str(z["meta"]))' in doc, "the naive json.loads(z['meta']) raises TypeError"
+    assert 'meta["models"]' in doc, "grid_stride is per-model, not a top-level meta key"
+    assert "grid_saved_hw" in doc
+    # And the raster route has to say the PNG is the pixels, not a figure: a matplotlib figure's
+    # axes and margins silently misregister the layer against its bounds.
+    assert "fromarray" in doc or "imsave" in doc
+    assert "matplotlib" in doc

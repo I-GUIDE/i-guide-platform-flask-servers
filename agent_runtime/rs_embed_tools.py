@@ -579,6 +579,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                      name: Optional[str] = None) -> str:
         """Embed a RECTANGLE with remote-sensing foundation models and PUT THE RESULT ON THE MAP.
 
+        This is also the entry point for SEGMENTATION into look-alike zones, CHANGE DETECTION
+        between periods, per-pixel similarity and land-cover-style clustering: there is no separate
+        tool for those, and each is written in code over the embedding package this saves — see
+        COMPOSING FROM THE PACKAGE below.
+
         NAMED US AREA? Do not use this. "the embedding of Urbana" / "of Champaign County"
         wants the administrative boundary, and this tool embeds a box around a point — it
         takes in everything outside the city limits along with it. Call
@@ -596,6 +601,36 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         or `lon`+`lat` for a point (a `buffer_m` square around it). A `file_id` is accepted
         only for POINT layers; for polygons use embed_zones, which keeps their shape.
         `start`/`end` are months, "YYYY-MM".
+
+        COMPOSING FROM THE PACKAGE. There is no segment / change / predict tool: the embedding is
+        the primitive and the rest is code over the .npz this saves. Stage it into execute_code by
+        passing `embedding_package.file_id` in `input_files` — a file_id an earlier TOOL produced
+        works, not just an upload — and load it with numpy:
+
+            grid__<model>    (D, H, W) float32 — the per-pixel embedding, north-up (row 0 = maxlat)
+            pooled__<model>  (D,) float32      — one vector for the whole region
+            meta             0-d ndarray of JSON — read it as json.loads(str(z["meta"])); plain
+                             json.loads(z["meta"]) raises TypeError
+
+        meta["models"] is a LIST, one entry per model, and grid_hw / grid_stride / grid_saved_hw
+        are fields of that ENTRY, not of meta itself. A `grid_stride` above 1 means the saved grid
+        is every Nth cell of the native grid_hw, so quote resolution from that entry's
+        grid_saved_hw (equivalently grid__<model>.shape[1:]) and never from grid_hw.
+
+        Then: k-means over the pixel axis for look-alike zones, 1 - cosine between two periods'
+        pooled vectors for how much a place changed, per-pixel cosine for WHERE it changed.
+
+        To deliver it, either polygonize and use add_map_layer — which gets a legend and clickable
+        zones, and is the better answer when the classes matter — or save the array AS AN IMAGE and
+        drape it with add_raster_layer, passing this call's `region_bbox` as bounds. For that
+        second route the PNG must be the pixels themselves, one image pixel per grid cell:
+        PIL.Image.fromarray(rgb).save(...) or plt.imsave(...). A matplotlib FIGURE is the wrong
+        thing to drape — axes, margins, titles and a colorbar all become part of the layer, and
+        the pixels no longer line up with the bounds, so the whole map is silently misregistered.
+
+        Two things to say rather than let the map imply them: clusters are unlabelled, so the same
+        number means nothing across separate runs, and a distance says THAT a place changed, not
+        what changed.
         """
         box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m, polygon_extent_ok=False)
         if isinstance(box, dict):
@@ -673,13 +708,30 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                         "models_in_package": pkg.get("models") or []}
             # The service caps which grids go into the export (300x300 cells). Say so: a
             # missing full-resolution grid is otherwise invisible until someone loads the file.
+            else:
+                # The package is the ONLY input to every composed operation — segmentation,
+                # change, prediction — so losing it removes those capabilities for the turn.
+                # Silence here read as "there is no package", and the model would go on to
+                # describe clustering it could not do.
+                info["unavailable"] = (
+                    "the embedding ran, but its vector package could not be fetched from the "
+                    "service, so there is no file to compose from")
+                info["consequence"] = (
+                    "clustering, change detection and prediction all need this file. Say the "
+                    "map layer is here but the per-pixel work is not available this turn — do "
+                    "not describe zones or distances you could not compute.")
+            # A grid too large for the export budget is DECIMATED now, not dropped, so a model
+            # missing from grids_saved means the export genuinely failed for it rather than that
+            # the region was too big.
             dropped = [m["model"] for m in summaries
                        if m["model"] not in (pkg.get("grids_saved") or [])]
             if dropped:
-                info["full_grid_omitted_for"] = dropped
-                info["why"] = ("the per-model grid exceeded the export cap (300x300 cells), so the "
-                               "file holds the pooled vector only — enough for similarity, "
-                               "prediction and comparison, not for per-pixel work")
+                info["grid_missing_for"] = dropped
+                info["why"] = ("no per-pixel grid came back for these models, so the file holds "
+                               "their pooled vector only — enough for similarity, prediction and "
+                               "comparison, not for per-pixel work. An oversized grid is "
+                               "decimated rather than dropped (the manifest gives grid_stride), "
+                               "so this is an export failure, not a size limit.")
             out["embedding_package"] = info
         # One descriptor per model; the client stacks them and the layer list toggles between.
         if layers:
@@ -687,91 +739,6 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             if len(layers) > 1:
                 out["map_layers"] = layers
         return json.dumps(out)
-
-    def segment_region(bbox: Optional[List[float]] = None, lon: Optional[float] = None,
-                       lat: Optional[float] = None, file_id: Optional[str] = None,
-                       k: int = 6, model: str = "gse", start: str = "2022-06",
-                       end: str = "2022-09", buffer_m: float = _DEFAULT_BUFFER_M,
-                       name: Optional[str] = None) -> str:
-        """Segment a region into `k` look-alike zones from its embedding, ON THE MAP.
-
-        Unsupervised land-cover-style segmentation: the embedding grid is clustered, so
-        ground that looks alike from space gets the same colour. Returns the map layer plus
-        a legend giving each cluster's share of the area. The clusters are discovered, not
-        named — cluster 3 is not "forest" until someone looks.
-        """
-        box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m)
-        if isinstance(box, dict):
-            return json.dumps({"ok": False, **box})
-        if not 2 <= int(k) <= 10:
-            return json.dumps({"ok": False, "error": f"k must be between 2 and 10; got {k}"})
-
-        res = _svc("/api/segment", {"geometry": _geometry(box), "start": start, "end": end,
-                                    "model": model, "k": int(k), "buffer_m": int(buffer_m)})
-        if res.get("error"):
-            return json.dumps({"ok": False, **res})
-        rec = _save_png(str(res.get("image") or ""), f"{_slug(name or 'segments')}_{model}_k{k}")
-        if not rec:
-            return json.dumps({"ok": False, "error": "the service returned no segmentation image"})
-        legend = [{"cluster": e.get("cluster"), "rgb": e.get("rgb"),
-                   "share_pct": round(float(e.get("frac") or 0) * 100, 1)}
-                  for e in (res.get("legend") or [])]
-        return json.dumps({
-            "ok": True, "region_bbox": box, "model": model, "k": int(k),
-            "grid": res.get("grid_hw"), "legend": legend, "on_map": True,
-            "image_file_id": rec["file_id"], "download_url": rec.get("download_url"),
-            "map_layer": _raster_layer(
-                rec, box, _layer_label(f"{model} segments (k={k})", _region_tag(name, box)),
-                _layer_id("segments", _region_tag(None, box), bbox=_round_bbox(box),
-                          model=model, k=int(k), start=start, end=end)),
-            "note": "Clusters are unlabelled: they group similar-looking ground, and the "
-                    "same number means nothing across separate runs.",
-        })
-
-    def embedding_change(bbox: Optional[List[float]] = None, lon: Optional[float] = None,
-                         lat: Optional[float] = None, file_id: Optional[str] = None,
-                         years: Optional[List[int]] = None, model: str = "gse",
-                         buffer_m: float = _DEFAULT_BUFFER_M, name: Optional[str] = None) -> str:
-        """Track how much a region CHANGED across years, from its embeddings.
-
-        Embeds the region once per year and reports each year's distance from the baseline
-        (the earliest year). A spike marks the year the place changed — new construction,
-        clearing, flooding. Returns the per-year table as a CSV file plus the numbers.
-        """
-        box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m)
-        if isinstance(box, dict):
-            return json.dumps({"ok": False, **box})
-        yrs = sorted({int(y) for y in (years or [])})
-        if len(yrs) < 2:
-            return json.dumps({"ok": False, "error": "give at least two years",
-                               "hint": "e.g. years=[2018, 2020, 2022, 2024]"})
-
-        res = _svc("/api/change", {"geometry": _geometry(box), "years": yrs, "model": model,
-                                   "buffer_m": int(buffer_m), "start": "2022-06", "end": "2022-09"})
-        if res.get("error"):
-            return json.dumps({"ok": False, **res})
-        used = [int(y) for y in (res.get("years") or [])]
-        dist = [float(d) for d in (res.get("distances") or [])]
-        rows = list(zip(used, dist, strict=False))
-
-        from agent_runtime.file_store import create_output_file_from_path
-
-        out = Path(tempfile.mkdtemp(prefix="rsembed_")) / f"{_slug(name or 'change')}_{model}.csv"
-        out.write_text("year,distance_from_baseline\n"
-                       + "".join(f"{y},{d:.6f}\n" for y, d in rows), encoding="utf-8")
-        rec = create_output_file_from_path(out, filename=out.name)
-        peak = max(rows, key=lambda t: t[1]) if rows else None
-        return json.dumps({
-            "ok": True, "region_bbox": box, "model": model,
-            "baseline_year": res.get("baseline"), "years": used,
-            "distances": [round(d, 4) for d in dist],
-            "largest_change_year": peak[0] if peak else None,
-            "largest_change_distance": round(peak[1], 4) if peak else None,
-            "csv_file_id": rec["file_id"], "download_url": rec.get("download_url"),
-            "errors": res.get("errors") or [],
-            "note": "Distance is 1 - cosine against the baseline year: 0 means indistinguishable. "
-                    "It says THAT the place changed, not what changed.",
-        })
 
     def compare_regions(bbox_a: List[float], bbox_b: List[float], model: str = "gse",
                         start: str = "2022-06", end: str = "2022-09") -> str:
@@ -804,29 +771,6 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         """List the pretrained downstream models that turn an embedding into a prediction."""
         res = _svc("/api/heads", method="GET")
         return json.dumps(res if res.get("error") else {"ok": True, **res})
-
-    def predict_for_region(bbox: Optional[List[float]] = None, lon: Optional[float] = None,
-                           lat: Optional[float] = None, file_id: Optional[str] = None,
-                           models: Optional[List[str]] = None, start: str = "2022-06",
-                           end: str = "2022-09", buffer_m: float = _DEFAULT_BUFFER_M) -> str:
-        """Run a pretrained downstream head on a region's embedding to PREDICT a value.
-
-        This is the "use the embedding" step: the region is embedded, then an already-trained
-        head turns that vector into an estimate (e.g. crop presence). Call
-        list_prediction_heads first to see what has been trained and how well it scored.
-        """
-        box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m)
-        if isinstance(box, dict):
-            return json.dumps({"ok": False, **box})
-        res = _svc("/api/predict", {"geometry": _geometry(box), "start": start, "end": end,
-                                    "models": [str(m) for m in (models or [])],
-                                    "buffer_m": int(buffer_m)})
-        if res.get("error"):
-            return json.dumps({"ok": False, **res})
-        return json.dumps({"ok": True, "region_bbox": box, **res,
-                           "note": "Each prediction carries the head's own validation score — "
-                                   "quote it, because a confident number from a weak head is "
-                                   "still a weak number."})
 
     def list_embedding_packages() -> str:
         """List the embedding packages already SAVED, newest first, with region and months.
@@ -1067,10 +1011,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             out["domain_unverifiable"] = unverifiable
         if "dofa" in usable:
             out["pooling_note"] = (
-                "predict_for_region puts dofa through the model's final norm layer on a square "
-                "or point region, which is a different vector from the one saved here; the saved "
-                "one is what the head was trained on. If both numbers are in play, report them "
-                "as two recipes rather than reconciling them.")
+                "The service's own re-embedding route puts dofa through the model's final norm "
+                "layer on a square or point region, which is a different vector from the one "
+                "saved in the package; the saved one is what the head was trained on. If a dofa "
+                "number from that route is also in play, report the two as different recipes "
+                "rather than reconciling them.")
         out["validation"] = {m: {k: head_score[m].get(k) for k in ("score", "score_name", "n")}
                              for m in usable if m in head_score}
         out["note"] = ("Scored the vectors already saved for this region, so no imagery was "
@@ -1297,13 +1242,10 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
     return [
         StructuredTool.from_function(func=list_embedding_models, name="list_embedding_models", metadata=meta),
         StructuredTool.from_function(func=embed_region, name="embed_region", metadata=meta),
-        StructuredTool.from_function(func=segment_region, name="segment_region", metadata=meta),
-        StructuredTool.from_function(func=embedding_change, name="embedding_change", metadata=meta),
         StructuredTool.from_function(func=compare_regions, name="compare_regions", metadata=meta),
         StructuredTool.from_function(func=align_embedding_colors, name="align_embedding_colors", metadata=meta),
         StructuredTool.from_function(func=list_prediction_heads, name="list_prediction_heads", metadata=meta),
         StructuredTool.from_function(func=list_embedding_packages, name="list_embedding_packages", metadata=meta),
-        StructuredTool.from_function(func=predict_for_region, name="predict_for_region", metadata=meta),
         StructuredTool.from_function(func=predict_from_package, name="predict_from_package", metadata=meta),
     ]
 
@@ -1861,7 +1803,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                     layer = {"url": rec.get("download_url"),
                              # k belongs in the id because it is in the label: asking for 3
                              # groups and then 6 is two analyses of the same zones, and the
-                             # second must not silently replace the first. segment_region
+                             # second must not silently replace the first. A zone raster
                              # already keys on its k for the same reason.
                              "id": _layer_id("zonegroups", file_id, **zone_content),
                              "label": _layer_label(
