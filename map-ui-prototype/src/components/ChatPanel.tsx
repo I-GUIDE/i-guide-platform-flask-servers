@@ -32,29 +32,81 @@ const RS_MODELS: { group: string; ids: string[] }[] = [
 
 const RS_YEARS = ['2024', '2023', '2022', '2021', '2020', '2019', '2018'];
 
+// embed_region truncates to _MAX_MODELS_PER_CALL SILENTLY (rs_embed_tools.py:37,386), so a
+// sixth pick would vanish without a word. Stop at the cap in the UI, where it can be explained.
+const RS_MAX_MODELS = 5;
+// The second group runs the encoder at request time. Every model in one embed_region call shares
+// a SINGLE 600s budget (rs_embed_tools.py:35), so two of these together can blow it and lose the
+// whole call — including the models that had already finished.
+const RS_ONTHEFLY = ['clay', 'prithvi', 'terramind'];
+
 // Written as the phrase that goes INTO the question, so the composed prompt reads like some-
-// thing a person would type rather than a form serialised into a sentence.
-const RS_SEASONS: { id: string; label: string; phrase: (y: string) => string }[] = [
-  { id: 'summer', label: 'Jun–Sep',    phrase: (y) => `June–September ${y}` },
-  { id: 'spring', label: 'Mar–May',    phrase: (y) => `March–May ${y}` },
-  { id: 'autumn', label: 'Sep–Nov',    phrase: (y) => `September–November ${y}` },
-  { id: 'year',   label: 'whole year', phrase: (y) => `the whole of ${y}` },
+// thing a person would type rather than a form serialised into a sentence. `over` is the same
+// window across SEVERAL years, for the Change question.
+const RS_SEASONS: { id: string; label: string; phrase: (y: string) => string; over: (ys: string) => string }[] = [
+  { id: 'summer', label: 'Jun–Sep',    phrase: (y) => `June–September ${y}`,     over: (ys) => `June–September of ${ys}` },
+  { id: 'spring', label: 'Mar–May',    phrase: (y) => `March–May ${y}`,          over: (ys) => `March–May of ${ys}` },
+  { id: 'autumn', label: 'Sep–Nov',    phrase: (y) => `September–November ${y}`, over: (ys) => `September–November of ${ys}` },
+  { id: 'year',   label: 'whole year', phrase: (y) => `the whole of ${y}`,       over: (ys) => `the whole of ${ys}` },
 ];
+
+/** The years the Change question compares: `year` and two before it, two apart where there is
+ *  room. Naively year-4/year-2 both clamp to the 2017 floor (GSE's first year), so 2018 and 2019
+ *  each asked about "2017, 2017 and 2019" — and now that every year is put on the map, that is
+ *  two identical layers, not just a clumsy sentence. Fill upward instead, and return however many
+ *  distinct years actually exist: at 2018 there are only two. */
+function rsChangeYears(year: string): string[] {
+  const y = Number(year);
+  const lo = 2017;
+  const seen = new Set<number>();
+  for (const v of [y - 4, y - 2, y]) seen.add(Math.max(lo, v));
+  for (let v = lo; seen.size < 3 && v <= y; v++) seen.add(v);
+  return [...seen].sort((a, b) => a - b).map(String);
+}
+
+/** "a", "a and b", "a, b and c" — the question has to read like English, not a serialised array. */
+function listJoin(items: string[]): string {
+  if (items.length < 2) return items[0] || '';
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
 
 // The four operations, composed from the current model and period rather than frozen. The
 // point of the demo is that these ARE parameters — a fixed "gse, June–September 2022" shows
 // one cell of the space and hides that the rest exists.
-function rsActions(model: string, year: string, season: string) {
-  const when = (RS_SEASONS.find((s) => s.id === season) || RS_SEASONS[0]).phrase(year);
-  const earlier = String(Math.max(2017, Number(year) - 4));
-  const middle = String(Math.max(2017, Number(year) - 2));
+function rsActions(models: string[], year: string, season: string) {
+  const sn = RS_SEASONS.find((s) => s.id === season) || RS_SEASONS[0];
+  const when = sn.phrase(year);
+  const changeYears = rsChangeYears(year);
+  // Only Embed takes several: embed_region is the one tool with a list-shaped `models`
+  // (rs_embed_tools.py:356) and returns one layer per model. segment/predict/change all take a
+  // scalar, so the rest read the first pick.
+  const model = models[0] || 'gse';
+  const many = models.length > 1;
+  const modelList = listJoin(models);
   return [
+    // Deliberately NOT "side by side" or "on a shared basis" for several models: that is the
+    // documented trigger for align_embedding_colors, which REFUSES across models — each has its
+    // own dimension and its own arbitrary frame (gse 64, tessera 128, terramind 384,
+    // copernicus/prithvi 768), so a shared PCA basis is undefined, not merely unimplemented.
+    // Each model gets its own layer and its own colours, and the sentence promises nothing more.
     { label: 'Embed',
-      prompt: `Embed this drawn region with the ${model} model for ${when} and put the embedding on the map.` },
+      prompt: many
+        // Every model renders the SAME footprint at opacity .85, so the layers stack and only the
+        // top one shows — without being told, that reads as "only one model ran". Asking for the
+        // list is what turns the stack into something navigable with the layer-list eye toggles.
+        ? `Embed this drawn region with the ${modelList} models for ${when}, put each model's embedding on the map as its own layer, and list them — they cover the same ground, so only the top one is visible until I toggle the rest.`
+        : `Embed this drawn region with the ${model} model for ${when} and put the embedding on the map.` },
     { label: 'Segment',
       prompt: `Segment this drawn region into 6 look-alike zones from its ${model} satellite embedding for ${when}, and show it on the map.` },
+    // Composed from embed_region rather than asking for embedding_change, which returns a CSV
+    // and NO layer and throws its per-year embeddings away — its own note says it tells you THAT
+    // the place changed, not what changed. Embedding each year instead puts all three on the map
+    // (start/end are part of the layer id, so they do not collide), leaves reusable packages
+    // behind, and makes the change readable as colour change. Here a shared basis IS meaningful:
+    // one model, one space, and align_embedding_colors already numbers same-region repeats.
+    // It also costs nothing extra — /api/change embeds once per year too.
     { label: 'Change',
-      prompt: `How much did this drawn region change across ${earlier}, ${middle} and ${year} according to its ${model} satellite embeddings?` },
+      prompt: `Embed this drawn region with the ${model} model for ${sn.over(listJoin(changeYears))}, put each year's embedding on the map on one shared colour basis, and work out from them how much the region changed year to year.` },
     { label: 'Predict',
       prompt: `Run the available pretrained heads on this drawn region using ${model} embeddings for ${when}, and report the predictions with their validation scores.` },
   ];
@@ -179,15 +231,21 @@ export function ChatPanel(p: Props) {
   // three selects above every conversation, for an operation nobody has chosen yet, is a form
   // where an offer belongs.
   const [rsOp, setRsOp] = useState<string | null>(null);
-  const [rsModel, setRsModel] = useState('gse');
+  // A LIST, because Embed takes several models in one call and returns a layer each. The other
+  // three operations read the first entry — see rsActions.
+  const [rsModels, setRsModels] = useState<string[]>(['gse']);
   const [rsYear, setRsYear] = useState('2022');
   const [rsSeason, setRsSeason] = useState('summer');
 
   // Stage an operation, or re-stage the current one after a setting changes.
-  const stageRs = (label: string | null, model = rsModel, year = rsYear, season = rsSeason) => {
+  const stageRs = (label: string | null, models = rsModels, year = rsYear, season = rsSeason) => {
     if (!label) return;
-    const action = rsActions(model, year, season).find((a) => a.label === label);
+    // Switching to an operation that takes ONE model drops the extra picks instead of leaving
+    // a selection lit that the composed question will not use.
+    const use = label === 'Embed' ? models : models.slice(0, 1);
+    const action = rsActions(use, year, season).find((a) => a.label === label);
     if (!action) return;
+    if (use.length !== models.length) setRsModels(use);
     setRsOp(label);
     setText(action.prompt);
   };
@@ -195,13 +253,33 @@ export function ChatPanel(p: Props) {
   // A setting changed: rewrite the staged question so the composer always shows what will
   // actually be sent. Only while something IS staged — otherwise changing a select would put
   // text into an empty composer the user never asked for.
-  const setRsOption = (which: 'model' | 'year' | 'season', value: string) => {
-    const next = { model: rsModel, year: rsYear, season: rsSeason, [which]: value } as
-      { model: string; year: string; season: string };
-    if (which === 'model') setRsModel(value);
+  const setRsOption = (which: 'year' | 'season', value: string) => {
+    const next = { year: rsYear, season: rsSeason, [which]: value } as
+      { year: string; season: string };
     if (which === 'year') setRsYear(value);
     if (which === 'season') setRsSeason(value);
-    stageRs(rsOp, next.model, next.year, next.season);
+    stageRs(rsOp, rsModels, next.year, next.season);
+  };
+
+  // Only Embed composes a question about several models, so only Embed selects several. On any
+  // other operation the chips behave as a radio group — the extra picks would be silently
+  // dropped by a scalar-model tool, and a control that ignores what you told it is worse than
+  // one that never offered.
+  const rsMultiOk = rsOp === 'Embed';
+  const toggleRsModel = (id: string) => {
+    let next: string[];
+    if (!rsMultiOk) next = [id];
+    else if (rsModels.includes(id)) {
+      // Never empty: a question needs a model, and the composer would read "with the  models".
+      next = rsModels.length > 1 ? rsModels.filter((m) => m !== id) : rsModels;
+    } else {
+      if (rsModels.length >= RS_MAX_MODELS) return;   // the cap is enforced on the button too
+      // Keep the declared order, so the sentence reads the same however they were clicked.
+      const order = RS_MODELS.flatMap((g) => g.ids);
+      next = order.filter((m) => m === id || rsModels.includes(m));
+    }
+    setRsModels(next);
+    stageRs(rsOp, next, rsYear, rsSeason);
   };
   const scrollRef = useRef<HTMLDivElement>(null);
   // Whether the transcript is FOLLOWING new content. True while the reader is at the bottom,
@@ -488,7 +566,7 @@ export function ChatPanel(p: Props) {
                 label costs 126px — exactly enough to push the fourth operation onto a second
                 line. Kept where there are no steps to explain it. */}
             {p.tab !== 'rs' && <span className="rslabel">🛰 satellite embedding</span>}
-            {rsActions(rsModel, rsYear, rsSeason).map((a) => (
+            {rsActions(rsModels, rsYear, rsSeason).map((a) => (
               <button key={a.label} className={`rsbtn ${rsOp === a.label ? 'on' : ''}`}
                 disabled={p.busy || !p.hasRegion}
                 aria-pressed={rsOp === a.label}
@@ -502,15 +580,40 @@ export function ChatPanel(p: Props) {
               to and the text they rewrite. */}
           {rsOp && (
             <div className="rsopts">
-              <label>model
-                <select value={rsModel} onChange={(e) => setRsOption('model', e.target.value)}>
-                  {RS_MODELS.map((g) => (
-                    <optgroup key={g.group} label={g.group}>
-                      {g.ids.map((id) => <option key={id} value={id}>{id}</option>)}
-                    </optgroup>
-                  ))}
-                </select>
-              </label>
+              {/* Chips, not a <select>. The composer cannot be the readout of what is picked:
+                  .box textarea is a fixed 40px with no auto-grow, so at a 380px pane it shows
+                  about 22 characters and the model names sit well past that. The control has to
+                  carry the selection itself, and a popover would hide it again. Its own full
+                  width line, so adding models pushes nothing else around. */}
+              <div className="rsmodels" role="group"
+                   aria-label={rsMultiOk ? `Models — up to ${RS_MAX_MODELS}` : 'Model'}>
+                {/* No visible label: it costs ~45px, which is exactly what pushes the six chips
+                    from one line to three at the default 460px pane. The model ids are self-
+                    identifying beside "year" and "months", each chip's title names its group, and
+                    the group carries the accessible name. */}
+                {RS_MODELS.flatMap((g) => g.ids).map((id) => {
+                  const on = rsModels.includes(id);
+                  const full = rsMultiOk && !on && rsModels.length >= RS_MAX_MODELS;
+                  const group = RS_MODELS.find((g) => g.ids.includes(id))?.group ?? '';
+                  return (
+                    <button key={id} type="button"
+                      className={`rschip ${on ? 'on' : ''}`}
+                      // A radio group when the operation takes one model, a checkbox set when it
+                      // takes several — so the semantics match what clicking actually does.
+                      role={rsMultiOk ? 'checkbox' : 'radio'} aria-checked={on}
+                      disabled={full}
+                      title={full
+                        ? `The service takes at most ${RS_MAX_MODELS} models in one call`
+                        : `${id} — ${group}`}
+                      onClick={() => toggleRsModel(id)}>{id}</button>
+                  );
+                })}
+                {rsMultiOk && rsModels.filter((m) => RS_ONTHEFLY.includes(m)).length > 1 && (
+                  <span className="rswarn" role="status">
+                    two encoders share one 10-minute budget — if it runs out you lose the whole call
+                  </span>
+                )}
+              </div>
               <label>year
                 <select value={rsYear} onChange={(e) => setRsOption('year', e.target.value)}>
                   {RS_YEARS.map((y) => <option key={y} value={y}>{y}</option>)}

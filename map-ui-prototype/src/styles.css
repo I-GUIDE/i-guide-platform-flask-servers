@@ -391,6 +391,24 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .rsbtn.on { background: #f6b93b; border-color: #c98a1a; color: #3d2a02; }
 .rsbtn.on:hover:not(:disabled) { background: #f2ad20; }
 
+/* The model picker. Its own full-width line inside .rsopts so a fifth chip pushes nothing else
+   around, and so the selection is readable at a glance — the composer is a fixed 40px and shows
+   about 22 characters at the pane's 380px floor, far short of where the model names sit. */
+.rsmodels { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.rschip { border: 1px solid var(--line); background: #fff; color: #5c6166; border-radius: 999px;
+  padding: 2px 9px; font: inherit; font-size: 12px; line-height: 1.7; cursor: pointer; }
+.rschip:hover:not(:disabled) { border-color: #c98a1a; color: #3d2a02; }
+/* Selected chips carry the same amber as a staged operation: one colour for "this is what the
+   question will use". */
+.rschip.on { background: #fdf1d6; border-color: #c98a1a; color: #3d2a02; font-weight: 600; }
+/* Disabled means the cap is reached, not that the model is unavailable — keep it legible rather
+   than greying it into looking broken. */
+.rschip:disabled { opacity: .45; cursor: not-allowed; }
+.rschip:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+/* Shown only when the combination is actually risky, so it reads as a fact about THIS selection
+   rather than a standing disclaimer nobody reads. */
+.rswarn { flex-basis: 100%; font-size: 11.5px; color: #9a6b1a; }
+
 /* Two panes need 380 + 8 + 360 = 748px of workspace. Below that the chat cannot shrink
    (flex:none), so the composer would be clipped by .app{overflow:hidden} with no scrollbar and
    no way to reach the send button. Fall back to the single-pane reading column the app already
