@@ -51,9 +51,12 @@ and check the sha against the host before assuming the tree matches what is runn
 
 Two constants worth knowing, because agent-side behaviour depends on them:
 
-- `GRID_SAVE_MAX_CELLS = 300 * 300` (`:135`, applied `:412`) — a per-pixel grid is written into the
-  export package only below 90,000 cells. `embed_region`'s own default footprint (`buffer_m=2048`,
-  a 4096 m square) is 410×411 = 168,100 cells, so **the default case exports no grid at all**.
+- `GRID_SAVE_MAX_CELLS = 300 * 300` (`:135`) is now a cell *budget*, not a cliff. A grid larger
+  than the budget is decimated by `_grid_stride` and always written; the manifest records
+  `grid_stride` and `grid_saved_hw` beside the native `grid_hw`. `EmbedReq.grid_max_cells`
+  raises the budget per request (0 = the default). Until 2026-09-09 the grid was *dropped*
+  above the cap, which meant `embed_region`'s own default footprint (`buffer_m=2048`, a 4096 m
+  square, 410×411 = 168,100 cells) exported no pixels at all.
 - `/api/change` embeds whole calendar years — `_temporal(rs, m, f"{y}-01", f"{y}-12")` (`:753`).
   It has no `start`/`end` field, and silently discards the ones the agent tool sends.
 

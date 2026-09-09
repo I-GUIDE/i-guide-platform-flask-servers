@@ -132,7 +132,24 @@ def _predict_one(reg, vec: np.ndarray, meta: dict, info: dict, model: str) -> di
     }
 
 
-GRID_SAVE_MAX_CELLS = 300 * 300  # cap grids saved into the package (keeps it small)
+GRID_SAVE_MAX_CELLS = 300 * 300  # cell budget for a grid written into the package
+
+
+def _grid_stride(gh: int, gw: int, max_cells: int) -> int:
+    """Smallest stride that brings a gh x gw grid under ``max_cells``.
+
+    The package used to DROP a grid that did not fit, which made the export cap a silent
+    capability cliff: a caller asking to cluster or difference an embedding got a file holding
+    the pooled vector and no pixels, with nothing in the array to say why. The default footprint
+    already exceeded it (a 2048 m buffer is a 4096 m square, 410x411 = 168,100 cells, 1.87x over),
+    so the DEFAULT case exported nothing. Decimating keeps every package usable and turns the cap
+    into a resolution, which the manifest then states.
+    """
+    s = 1
+    while ((gh + s - 1) // s) * ((gw + s - 1) // s) > max_cells:
+        s += 1
+    return s
+
 
 _ee_ready = False
 
@@ -193,6 +210,9 @@ class PreviewReq(BaseModel):
 
 class EmbedReq(PreviewReq):
     models: list[str] = []
+    # Cell budget for the per-pixel grid in the export package. The grid is decimated to
+    # fit rather than dropped, so raising this buys resolution at the cost of file size.
+    grid_max_cells: int = 0  # 0 means GRID_SAVE_MAX_CELLS
 
 
 class PredictReq(PreviewReq):
@@ -409,9 +429,11 @@ def api_embed(req: EmbedReq) -> Any:
             mtype = "precomputed" if m in PRECOMPUTED else "onthefly"
             info = _meta_json(meta)
             pkg[f"pooled__{m}"] = vec.astype(np.float32)
-            saved = gh * gw <= GRID_SAVE_MAX_CELLS
-            if saved:
-                pkg[f"grid__{m}"] = grid.astype(np.float32)
+            budget = int(getattr(req, "grid_max_cells", 0) or GRID_SAVE_MAX_CELLS)
+            stride = _grid_stride(gh, gw, budget)
+            sub = grid[:, ::stride, ::stride] if stride > 1 else grid
+            pkg[f"grid__{m}"] = sub.astype(np.float32)
+            saved = True
             pkg_models.append(
                 {
                     "model": m,
@@ -419,6 +441,11 @@ def api_embed(req: EmbedReq) -> Any:
                     "dim": int(vec.shape[0]),
                     "grid_hw": [gh, gw],
                     "grid_saved": bool(saved),
+                    # The grid in the package is this much coarser than grid_hw. 1 means it is
+                    # the native grid; anything higher and a consumer is looking at every Nth
+                    # cell, which it has to know before quoting a per-pixel result.
+                    "grid_stride": int(stride),
+                    "grid_saved_hw": [int(sub.shape[1]), int(sub.shape[2])],
                     # In the manifest too: the .npz outlives this response, and a vector whose
                     # sensor and dates are unrecorded cannot be compared with a later one.
                     "meta": info,
