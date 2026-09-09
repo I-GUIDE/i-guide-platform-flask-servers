@@ -69,6 +69,48 @@ def _svc(path: str, payload: Optional[Dict[str, Any]] = None, *, method: str = "
         return {"error": f"rs-embed service returned unparseable output: {exc}"}
 
 
+
+def _svc_upload(path: str, file_path: Any, *, field: str = "file",
+                timeout: Optional[float] = None) -> Dict[str, Any]:
+    """POST a file to the rs-embed service as multipart/form-data.
+
+    The same three failure branches as :func:`_svc`, deliberately: a caller cannot tell from the
+    result which helper produced the error, and "the service is down, do not invent a value" has
+    to read the same either way.
+    """
+    import requests
+
+    url = f"{RS_EMBED_URL}{path}"
+    timeout = float(timeout or _TIMEOUT_S)
+    try:
+        with open(file_path, "rb") as fh:
+            r = requests.post(url, files={field: (Path(str(file_path)).name, fh,
+                                                  "application/octet-stream")},
+                              timeout=timeout)
+    except FileNotFoundError:
+        return {"error": f"the file to upload is gone: {file_path}"}
+    except requests.exceptions.ConnectionError:
+        return {"error": f"the rs-embed service is not reachable at {RS_EMBED_URL}",
+                "hint": "Start it with: python -m uvicorn server:app --app-dir examples/webapp "
+                        "--port 8077 (from the rs-embed repo), or set RS_EMBED_URL to where it runs. "
+                        "Without it no embedding tool can run — say so rather than inventing values."}
+    except requests.exceptions.Timeout:
+        return {"error": f"the rs-embed service did not answer within {timeout:.0f}s",
+                "hint": "Retry; a package upload is usually fast, so a timeout here suggests the "
+                        "service is wedged rather than busy."}
+    if r.status_code >= 400:
+        detail = ""
+        try:
+            detail = str(r.json().get("error") or r.json().get("detail") or "")[:400]
+        except Exception:  # noqa: BLE001
+            detail = r.text[:400]
+        return {"error": f"rs-embed service returned HTTP {r.status_code}", "detail": detail}
+    try:
+        return r.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"rs-embed service returned unparseable output: {exc}"}
+
+
 # --- geometry ------------------------------------------------------------------
 def _mercator_square(lon: float, lat: float, buffer_m: float) -> List[float]:
     """The +/-buffer_m square around (lon, lat) measured in EPSG:3857, as a lon/lat bbox."""
@@ -596,6 +638,43 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                                    "quote it, because a confident number from a weak head is "
                                    "still a weak number."})
 
+    def predict_from_package(file_id: str) -> str:
+        """Run the pretrained heads on an embedding package you ALREADY have.
+
+        The heads are trained weights that live on the service and are never exported, so this is
+        the only route to them from here. Unlike predict_for_region it does not re-embed: pass the
+        `embedding_package.file_id` that embed_region returned, from this turn or an earlier one,
+        and the region is not paid for twice.
+
+        Call list_prediction_heads first. Coverage is narrow — quote each head's validation score,
+        because a confident number from a weak head is still a weak number, and say plainly when
+        the head has no coverage for the model in the package.
+        """
+        from agent_runtime.file_store import resolve_file_id
+
+        try:
+            path = resolve_file_id(str(file_id).strip())
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({
+                "ok": False, "error": f"cannot resolve {file_id!r}: {type(exc).__name__}: {exc}",
+                "hint": "Pass embedding_package.file_id from an embed_region result."})
+        if not str(path).lower().endswith(".npz"):
+            return json.dumps({
+                "ok": False,
+                "error": f"{Path(str(path)).name} is not an embedding package (.npz)",
+                "hint": "Pass embedding_package.file_id from an embed_region result — not the "
+                        "PNG, and not the map layer."})
+        res = _svc_upload("/api/predict_package", path)
+        if res.get("error"):
+            return json.dumps({"ok": False, **res})
+        return json.dumps({
+            "ok": True, "package_file_id": file_id, **res,
+            "note": "Each prediction carries the head's own validation score — quote it, because "
+                    "a confident number from a weak head is still a weak number. The heads read "
+                    "the POOLED vector, so this is one estimate for the whole region, not a "
+                    "per-pixel map.",
+        })
+
     def align_embedding_colors(file_ids: List[str], model: Optional[str] = None,
                                names: Optional[List[str]] = None) -> str:
         """Re-colour several already-embedded regions on ONE shared PCA basis, so the colours
@@ -791,6 +870,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         StructuredTool.from_function(func=align_embedding_colors, name="align_embedding_colors", metadata=meta),
         StructuredTool.from_function(func=list_prediction_heads, name="list_prediction_heads", metadata=meta),
         StructuredTool.from_function(func=predict_for_region, name="predict_for_region", metadata=meta),
+        StructuredTool.from_function(func=predict_from_package, name="predict_from_package", metadata=meta),
     ]
 
 

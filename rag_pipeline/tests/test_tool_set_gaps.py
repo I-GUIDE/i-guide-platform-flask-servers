@@ -62,15 +62,29 @@ def test_the_skill_tools_are_not_added_twice(monkeypatch, a_tool):
 # --- add_map_layer exists with nothing attached --------------------------------------------
 
 def test_add_map_layer_is_bound_on_a_no_upload_turn():
-    """"show me Champaign County on the map" needs it, and the peer had no way to deliver."""
+    """"show me Champaign County on the map" needs it, and the peer had no way to deliver.
+
+    Asserted through the shared constant rather than the filter's source text: the filter used to
+    name one tool inline, and pinning that string made the test fail when a second delivery route
+    was added, which is the opposite of what it is guarding.
+    """
     import inspect
 
     from agent_runtime.supervisor import graph as g
 
+    assert "add_map_layer" in g._MAP_DELIVERY_TOOLS
     for fn in (g.default_analyze_fn, g.default_code_fn):
         src = inspect.getsource(fn)
-        assert 'if str(getattr(t, "name", "")) == "add_map_layer"' in src, fn.__name__
+        assert "_MAP_DELIVERY_TOOLS" in src, fn.__name__
         assert "if not input_file_ids:" in src, fn.__name__
+
+
+def test_a_composed_raster_has_a_delivery_route_on_a_no_upload_turn():
+    """A drawn region has no upload, and clustering its embedding in code yields PIXELS, not
+    geometry. add_map_layer refuses images by name, so without this the work had nowhere to go."""
+    from agent_runtime.supervisor import graph as g
+
+    assert "add_raster_layer" in g._MAP_DELIVERY_TOOLS
 
 
 def test_only_add_map_layer_is_hoisted_not_the_whole_factory():

@@ -358,11 +358,13 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         if Path(name).suffix.lower() not in _IMAGE_EXTS:
             return None
         return {"ok": False,
-                "error": f"{name} is an image, and an image cannot become an interactive map "
-                         f"layer — it has no geometry to pan, zoom or click.",
+                "error": f"{name} is an image, so it has no geometry to pan, zoom or click and "
+                         f"cannot become an interactive layer.",
                 "hint": "Pass the DATASET this picture was drawn from instead. add_map_layer "
                         "reads GeoJSON, CSV/TSV with lat-lon columns, shapefile (.shp/.zip), "
-                        "GeoPackage and GeoParquet. Keep the image as a download alongside it.",
+                        "GeoPackage and GeoParquet. If the PIXELS are the result — a cluster "
+                        "mask, a change surface — drape it with add_raster_layer, which takes "
+                        "the image plus its [minlon, minlat, maxlon, maxlat] bounds.",
                 "mappable_file_ids": _mappable_attached(exclude=file_id)}
 
     def inspect_vector(file_id: str, sibling_file_ids: Optional[List[str]] = None,
@@ -631,6 +633,86 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 shutil.rmtree(out.parent, ignore_errors=True)
 
     meta = {"category": "geo"}
+
+    def add_raster_layer(file_id: str, bounds: List[float], name: Optional[str] = None,
+                         opacity: float = 0.85) -> str:
+        """Drape a georeferenced IMAGE over the map — a heat surface, a cluster mask, a rendered
+        grid you computed yourself.
+
+        Use this for a picture whose pixels ARE the result: k-means clusters over an embedding
+        grid, a per-pixel change or similarity surface, a PCA rendering. Use add_map_layer instead
+        for anything with geometry to click, and prefer it when you have the choice — a raster
+        cannot be queried, carries no legend, and the user can only look at it.
+
+        `bounds` is [minlon, minlat, maxlon, maxlat] in EPSG:4326, describing the FULL extent the
+        image covers, and the image is stretched to fill it. Nothing downstream can check that the
+        box matches the picture: a wrong box draws a plausible-looking layer in the wrong place, so
+        take the bounds from whatever produced the pixels rather than estimating them. An embedding
+        package's `region_bbox` is exactly this, in this order.
+
+        Rows are assumed north-up: image row 0 is the maxlat edge. Flip the array before saving if
+        yours runs the other way.
+        """
+        try:
+            path, rec = _resolve(file_id)
+            name_on_disk = _true_name(path, rec)
+            if Path(name_on_disk).suffix.lower() not in _IMAGE_EXTS:
+                return json.dumps({
+                    "ok": False,
+                    "error": f"{name_on_disk} is not an image, and this tool drapes an image.",
+                    "hint": "For a dataset with geometry use add_map_layer, which reads GeoJSON, "
+                            "CSV/TSV with lat-lon columns, shapefile, GeoPackage and GeoParquet."})
+            url = (rec or {}).get("download_url")
+            if not url:
+                return json.dumps({
+                    "ok": False,
+                    "error": "that file has no download URL, so the client cannot fetch it to draw",
+                    "hint": "Save the image through the file store (an output file) and pass the "
+                            "file_id it returns."})
+            try:
+                box = [float(v) for v in (bounds or [])]
+            except (TypeError, ValueError):
+                box = []
+            if len(box) != 4:
+                return json.dumps({"ok": False,
+                                   "error": f"bounds needs 4 numbers [minlon, minlat, maxlon, "
+                                            f"maxlat], got {bounds!r}"})
+            minlon, minlat, maxlon, maxlat = box
+            if not (minlon < maxlon and minlat < maxlat):
+                return json.dumps({
+                    "ok": False,
+                    "error": f"bounds is not a box: [{minlon}, {minlat}, {maxlon}, {maxlat}]",
+                    "hint": "Order is [minlon, minlat, maxlon, maxlat] — west, south, east, north."})
+            if not (-180 <= minlon <= 180 and -180 <= maxlon <= 180
+                    and -90 <= minlat <= 90 and -90 <= maxlat <= 90):
+                return json.dumps({
+                    "ok": False,
+                    "error": f"bounds is outside lon/lat range: {box}",
+                    "hint": "These are EPSG:4326 degrees. Projected metres will land off the map."})
+            try:
+                op = min(1.0, max(0.05, float(opacity)))
+            except (TypeError, ValueError):
+                op = 0.85
+            label = str(name or Path(name_on_disk).stem).strip() or "raster"
+            # Identify the layer by WHAT IT SHOWS, so re-running a step replaces its own layer
+            # instead of stacking a second copy, while a different image or a different footprint
+            # is a different layer. The label is excluded deliberately: it is a display string and
+            # moves when the wording does.
+            import hashlib
+            digest = hashlib.sha1(
+                json.dumps({"url": url, "bounds": [round(v, 6) for v in box]},
+                           sort_keys=True).encode("utf-8")).hexdigest()[:12]
+            layer = {"url": url, "label": label, "render": "raster", "bounds": box,
+                     "opacity": op, "source": "analysis", "id": f"raster-{digest}"}
+            return json.dumps({
+                "ok": True, "map_layer": layer, "bounds": box, "file_id": file_id,
+                "note": "A raster carries no legend and nothing on it can be clicked. If the "
+                        "classes or values matter to the answer, say what the colours mean in "
+                        "the text — the map will not.",
+            })
+        except Exception as exc:  # noqa: BLE001 - a bad reference is an answerable error
+            return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
     def add_map_layer(file_id: str, render: str = "auto", column: Optional[str] = None,
                       name: Optional[str] = None, sibling_file_ids: Optional[List[str]] = None,
                       max_points: Optional[int] = None) -> str:
@@ -782,6 +864,14 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "by file_id; reprojects to WGS84 and samples very large point sets for "
                          "display. A PNG tool (render_map_image) is only for a static image someone wants "
                          "to download.")),
+        StructuredTool.from_function(func=add_raster_layer, name="add_raster_layer", metadata=meta,
+            description=("Drape a georeferenced IMAGE over the user's map, for pixels that ARE the "
+                         "result: a k-means cluster mask over an embedding grid, a per-pixel change "
+                         "or similarity surface, a rendering you computed in code. Takes the image "
+                         "by file_id plus `bounds` [minlon, minlat, maxlon, maxlat] in EPSG:4326 — "
+                         "an embedding package's region_bbox is exactly that. Rows are north-up. "
+                         "Use add_map_layer instead whenever the result has geometry: a raster "
+                         "cannot be clicked and carries no legend.")),
         StructuredTool.from_function(func=inspect_vector, name="inspect_vector", metadata=meta,
             description=("Read a vector / shapefile's metadata (CRS, extent, geometry type, feature "
                          "count, attribute columns) without loading all geometry. Handles a TIGER/Line "

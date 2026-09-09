@@ -2729,6 +2729,11 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
 # (test_rs_embed_zonal asserts the zonal tools are in here) — deliberately NOT a delivery
 # signal any more: a tool NAME says nothing about whether the call succeeded, and matching on it
 # is what let a failed admin_boundary report a layer. Ask _map_delivered_this_turn instead.
+# The map-delivery tools handed to a peer that has NO uploads — the drawn-region case, which is
+# exactly when an embedding gets clustered or differenced in code and the result is pixels rather
+# than geometry. Filtering to add_map_layer alone left that work with nowhere to put its raster.
+_MAP_DELIVERY_TOOLS = ("add_map_layer", "add_raster_layer")
+
 _MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search",
                     "embed_region", "segment_region", "embed_zones",
                     "fit_zone_model", "admin_boundary")
@@ -2819,9 +2824,10 @@ def _models_used(execution_context: Any) -> set:
 
 _MODEL_MISMATCH_OBSERVATION = (
     "The user named a specific embedding model ({wanted}) and the run used {used} instead — "
-    "the embedding tools default their `model` argument, so leaving it out silently embeds "
-    "with something else. Call the embedding tool again with model='{wanted}', and describe "
-    "the model that actually ran."
+    "the embedding tools default their model argument, so leaving it out silently embeds "
+    "with something else. Call the embedding tool again naming {wanted} explicitly: "
+    "embed_region takes models=['{wanted}'] (a LIST, and it accepts several at once), while "
+    "segment_region and the rest take model='{wanted}'. Then describe the model that actually ran."
 )
 
 # An answer that tells the user to add a layer they can already see. The map is delivered as
@@ -3090,7 +3096,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
 
             if not input_file_ids:
                 tools.extend(t for t in make_langchain_geo_tools(default_input_file_ids=None)
-                             if str(getattr(t, "name", "")) == "add_map_layer")
+                             if str(getattr(t, "name", "")) in _MAP_DELIVERY_TOOLS)
         except Exception:
             pass
         if input_file_ids:
@@ -3570,7 +3576,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
 
             if not input_file_ids:
                 tools.extend(t for t in make_langchain_geo_tools(default_input_file_ids=None)
-                             if str(getattr(t, "name", "")) == "add_map_layer")
+                             if str(getattr(t, "name", "")) in _MAP_DELIVERY_TOOLS)
         except Exception:
             pass
         if input_file_ids:
