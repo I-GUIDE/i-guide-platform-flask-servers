@@ -19,12 +19,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import itertools
 import json
 import logging
 import os
 import tempfile
+import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,93 @@ _MAX_MODELS_PER_CALL = 5
 # How many saved packages list_embedding_packages will describe. Each one costs opening its .npz
 # to read the manifest, and a listing long enough to need scrolling is not an answer anyway.
 _PACKAGE_LIST_MAX = 15
+# An identical embed_zones call, repeated inside one turn, replayed instead of re-swept. The
+# model does this — the reported Champaign/Urbana turn swept one city twice — and a sweep is the
+# most expensive thing here: one request to the imagery provider per tile, minutes of wall clock,
+# and now that a named area is no longer capped, a duplicate costs a FULL second sweep rather
+# than a cheap partial one. Keyed on every argument that determines the result, so a legitimate
+# repeat (the same polygon for a different year, which is exactly the Change workflow) still runs.
+_ZONE_MEMO: "OrderedDict[str, Tuple[float, str]]" = OrderedDict()
+_ZONE_MEMO_TTL_S = float(os.getenv("RS_EMBED_ZONE_MEMO_TTL_S", "1800"))
+_ZONE_MEMO_MAX = 32
+_ZONE_SCOPE_SEQ = itertools.count(1)
+
+
+def _zone_memo_scope() -> Optional[str]:
+    """A token for the TURN in flight, or None when there is no turn.
+
+    Scoped to the streaming trace state, which is a ContextVar set once per request — so a
+    replay can only ever serve the call it duplicates, never a later conversation. Process-global
+    would have been wrong twice over: it would replay a result into a turn that never asked for
+    it, and it silently coupled two tests in test_rs_embed_zonal that call this tool with the
+    same arguments and different stubbed responses.
+
+    None means no memo at all: without a trace state there is no turn to be inside — a CLI run,
+    an eval, a unit test — and the duplicate this exists to stop happens inside one.
+    """
+    try:
+        from agent_runtime.streaming_trace import _TRACE_STATE
+
+        state = _TRACE_STATE.get()
+        if state is None:
+            return None
+        # NOT id(): CPython reuses an address once the object is freed, so a later turn whose
+        # state landed on a freed one's address would read the earlier turn's results — the
+        # exact cross-turn replay this scoping exists to prevent, and a test caught it doing so.
+        #
+        # Stamped onto the state. A WeakKeyDictionary would be tidier — no mutation of another
+        # module's object — but _TraceState is a plain @dataclass, so it generates __eq__ and is
+        # therefore UNHASHABLE and cannot be a weak key. Holding a strong reference instead, to
+        # keep an id alive, would pin a turn's sink and handler in memory for the whole TTL.
+        #
+        # This needs _TraceState to accept attributes, which it does today and would not under
+        # `@dataclass(slots=True)`. test_the_scope_resolves_for_a_real_trace_state fails loudly
+        # if that changes, rather than letting the memo quietly stop working.
+        token = getattr(state, "_rs_zone_memo_scope", None)
+        if token is None:
+            token = f"turn{next(_ZONE_SCOPE_SEQ)}"
+            setattr(state, "_rs_zone_memo_scope", token)
+        return str(token)
+    except Exception:  # noqa: BLE001 - the memo must never be the thing that breaks a call
+        return None
+
+
+def _zone_memo_key(**call: Any) -> str:
+    """Every argument that determines the result, order-normalised so a reordered list of
+    zone_ids is the same question rather than a new one."""
+    norm = dict(call)
+    for field in ("zone_ids", "sibling_file_ids"):
+        if field in norm:
+            norm[field] = sorted(str(v) for v in (norm[field] or []))
+    blob = json.dumps(norm, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def _zone_memo_get(key: str, *, now: Optional[float] = None) -> Optional[str]:
+    """The stored result for an identical call in THIS turn. Expired entries drop on read."""
+    scope = _zone_memo_scope()
+    if scope is None:
+        return None
+    stamp = time.time() if now is None else now
+    for k in [k for k, (ts, _) in _ZONE_MEMO.items() if stamp - ts > _ZONE_MEMO_TTL_S]:
+        _ZONE_MEMO.pop(k, None)
+    hit = _ZONE_MEMO.get(f"{scope}:{key}")
+    if hit is None:
+        return None
+    _ZONE_MEMO.move_to_end(f"{scope}:{key}")
+    return hit[1]
+
+
+def _zone_memo_put(key: str, result: str, *, now: Optional[float] = None) -> None:
+    """Remember a SUCCESSFUL result. A failure is not cached: the next call should retry it —
+    a wedged service or an expired credential is exactly the case where attempt two works."""
+    scope = _zone_memo_scope()
+    if scope is None:
+        return
+    _ZONE_MEMO[f"{scope}:{key}"] = (time.time() if now is None else now, result)
+    _ZONE_MEMO.move_to_end(f"{scope}:{key}")
+    while len(_ZONE_MEMO) > _ZONE_MEMO_MAX:
+        _ZONE_MEMO.popitem(last=False)
 
 
 def _svc(path: str, payload: Optional[Dict[str, Any]] = None, *, method: str = "POST",
@@ -1559,6 +1649,29 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         there, the per-zone SUM is recoverable exactly, so zones roll up to a coarser
         partition without error.
         """
+        # Every argument that determines the result. A repeat with ANY of them changed is a
+        # different question and runs: same polygon, different year is the Change workflow.
+        memo_key = _zone_memo_key(
+            file_id=file_id, zone_id_field=zone_id_field, model=model, year=year,
+            clusters=clusters, tile_px=tile_px, max_tiles=max_tiles, name=name,
+            zone_ids=sorted(str(z) for z in (zone_ids or [])),
+            sibling_file_ids=sorted(str(f) for f in (sibling_file_ids or [])),
+            start=start, end=end)
+        replayed = _zone_memo_get(memo_key)
+        if replayed is not None:
+            try:
+                prior = json.loads(replayed)
+            except ValueError:  # pragma: no cover - a stored result is our own json
+                prior = None
+            if isinstance(prior, dict):
+                # Says so in the payload the model reads. The trace still shows two calls, and
+                # an answer that describes two sweeps of one city would be wrong about what was
+                # done — the layers and file_ids below are the FIRST call's, not a second set.
+                prior["reused_earlier_run"] = (
+                    "identical to a call already made in this conversation, so the tiles were "
+                    "not fetched again — these are that run's layers and files, not new ones")
+                return json.dumps(prior)
+
         tmp = None
         # Outside the guard below: that try/except exists because `_stage` is missing in some
         # builds, and its fallback branch does not re-import everything. map_layers has no
@@ -1808,7 +1921,13 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             if len(layers) > 1:
                 out["map_layers"] = layers
             out["on_map"] = True
-        return json.dumps(out)
+        rendered = json.dumps(out)
+        # Only a SUCCESSFUL sweep is remembered. A failure should be retried, not replayed —
+        # a wedged service or an expired credential is exactly the case where the second
+        # attempt is the one that works.
+        if out.get("ok"):
+            _zone_memo_put(memo_key, rendered)
+        return rendered
 
 
     def fit_zone_model(vectors_csv_file_id: str, polygons_file_id: str, label_column: str,

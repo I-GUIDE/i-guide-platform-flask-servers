@@ -866,3 +866,139 @@ def test_a_date_range_reaches_the_zonal_service():
     assert "start" not in _zonal_service_body({"start": "2025-03-01"})
     assert "end" not in _zonal_service_body({"end": "2025-05-01"})
     assert "start" not in _zonal_service_body({})
+
+
+# --- an identical sweep is replayed, a different one is not --------------------
+def _memo_call(**over):
+    """The argument set embed_zones keys its memo on."""
+    base = dict(file_id="file_poly", zone_id_field="GEOID", model="gse", year=2022,
+                clusters=5, tile_px=200, max_tiles=None, name=None,
+                zone_ids=[], sibling_file_ids=[], start="2022-06", end="2022-09")
+    base.update(over)
+    return base
+
+
+def _a_turn():
+    """A real _TraceState. Not object(): the scope is a WeakKeyDictionary key and a bare
+
+    object cannot be weak-referenced, so a fixture built on one silently disabled the memo and
+    every test below it read as a failure of the code rather than of the fixture.
+    """
+    from agent_runtime.streaming_trace import _TraceState
+
+    return _TraceState(sink=None, handler=None, agent_role="test")
+
+
+@pytest.fixture()
+def in_a_turn(monkeypatch):
+    """A trace state, because the memo is scoped to the turn and is inert without one."""
+    import agent_runtime.rs_embed_tools as T
+    from agent_runtime.streaming_trace import _TRACE_STATE
+
+    monkeypatch.setattr(T, "_ZONE_MEMO", T.OrderedDict())
+    state = _a_turn()
+    token = _TRACE_STATE.set(state)
+    yield T
+    _TRACE_STATE.reset(token)
+
+
+def test_without_a_turn_nothing_is_remembered(monkeypatch):
+    """No trace state means no turn to be inside: a CLI run, an eval, a unit test. The memo
+
+    exists for a duplicate WITHIN one turn, and a process-global cache would replay a result
+    into a conversation that never asked for it.
+    """
+    import agent_runtime.rs_embed_tools as T
+
+    monkeypatch.setattr(T, "_ZONE_MEMO", T.OrderedDict())
+    key = T._zone_memo_key(**_memo_call())
+    T._zone_memo_put(key, '{"ok": true}')
+    assert T._zone_memo_get(key) is None
+    assert len(T._ZONE_MEMO) == 0
+
+
+def test_another_turn_does_not_see_this_ones_result(monkeypatch):
+    import agent_runtime.rs_embed_tools as T
+    from agent_runtime.streaming_trace import _TRACE_STATE
+
+    monkeypatch.setattr(T, "_ZONE_MEMO", T.OrderedDict())
+    key = T._zone_memo_key(**_memo_call())
+    first = _a_turn()
+    token = _TRACE_STATE.set(first)
+    T._zone_memo_put(key, '{"ok": true}')
+    assert T._zone_memo_get(key) is not None
+    _TRACE_STATE.reset(token)
+
+    second = _a_turn()                            # a different turn
+    token2 = _TRACE_STATE.set(second)
+    assert T._zone_memo_get(key) is None
+    _TRACE_STATE.reset(token2)
+
+
+def test_the_same_sweep_twice_is_one_sweep(in_a_turn):
+    """The reported turn swept one city twice. A sweep is one provider request PER TILE, and
+
+    since a named area is no longer capped the duplicate costs a full second sweep rather than
+    a cheap partial one — which is what promoted this from wasteful to the dominant cost.
+    """
+    T = in_a_turn
+    key = T._zone_memo_key(**_memo_call())
+    assert T._zone_memo_get(key) is None
+    T._zone_memo_put(key, '{"ok": true, "zones_with_pixels": 1}')
+    assert T._zone_memo_get(key) == '{"ok": true, "zones_with_pixels": 1}'
+
+
+def test_the_same_polygon_in_a_different_year_still_runs(in_a_turn):
+    """Same polygon, different period is the CHANGE workflow — three sweeps on purpose."""
+    T = in_a_turn
+    T._zone_memo_put(T._zone_memo_key(**_memo_call()), '{"ok": true}')
+    for differs in ({"start": "2018-06", "end": "2018-09"}, {"model": "satmae"},
+                    {"clusters": 6}, {"zone_ids": ["17019"]}, {"max_tiles": 20}):
+        assert T._zone_memo_get(T._zone_memo_key(**_memo_call(**differs))) is None, differs
+
+
+def test_zone_ids_order_does_not_make_a_new_call(in_a_turn):
+    T = in_a_turn
+    T._zone_memo_put(T._zone_memo_key(**_memo_call(zone_ids=["b", "a"])), '{"ok": true}')
+    assert T._zone_memo_get(T._zone_memo_key(**_memo_call(zone_ids=["a", "b"]))) is not None
+
+
+def test_an_entry_expires(in_a_turn):
+    T = in_a_turn
+    key = T._zone_memo_key(**_memo_call())
+    T._zone_memo_put(key, '{"ok": true}', now=1000.0)
+    assert T._zone_memo_get(key, now=1000.0 + T._ZONE_MEMO_TTL_S - 1) is not None
+    assert T._zone_memo_get(key, now=1000.0 + T._ZONE_MEMO_TTL_S + 1) is None
+
+
+def test_the_memo_is_bounded(in_a_turn):
+    """A long session must not accumulate embedding results in process memory."""
+    T = in_a_turn
+    for i in range(T._ZONE_MEMO_MAX + 8):
+        T._zone_memo_put(T._zone_memo_key(**_memo_call(file_id=f"file_{i}")), '{"ok": true}')
+    assert len(T._ZONE_MEMO) == T._ZONE_MEMO_MAX
+    # The oldest went first, the newest is still there.
+    assert T._zone_memo_get(T._zone_memo_key(**_memo_call(file_id="file_0"))) is None
+    assert T._zone_memo_get(
+        T._zone_memo_key(**_memo_call(file_id=f"file_{T._ZONE_MEMO_MAX + 7}"))) is not None
+
+
+def test_the_scope_resolves_for_a_real_trace_state():
+    """The memo hangs a token on the trace state, which needs _TraceState to accept attributes.
+
+    It does today. Under `@dataclass(slots=True)` it would not, and the memo would stop working
+    SILENTLY — every duplicate sweep running again with nothing to say so. This is the alarm.
+    (A WeakKeyDictionary would avoid the mutation, but a plain dataclass generates __eq__ and is
+    therefore unhashable, so it cannot be a weak key.)
+    """
+    import agent_runtime.rs_embed_tools as T
+    from agent_runtime.streaming_trace import _TRACE_STATE
+
+    state = _a_turn()
+    token = _TRACE_STATE.set(state)
+    try:
+        scope = T._zone_memo_scope()
+        assert scope is not None, "the memo is inert: _TraceState no longer accepts attributes"
+        assert T._zone_memo_scope() == scope, "the same turn must resolve to the same scope"
+    finally:
+        _TRACE_STATE.reset(token)
