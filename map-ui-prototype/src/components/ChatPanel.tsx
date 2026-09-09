@@ -145,7 +145,6 @@ interface Props {
   onSetMode: (m: Mode) => void;
   onSetCfg: (c: AgentCfg) => void;
   onSetSpatial: (v: boolean) => void;
-  onToggleSettings: () => void;
 }
 
 const GROUP_LABEL: Record<SourceGroup, string> = {
@@ -582,30 +581,27 @@ export function ChatPanel(p: Props) {
         </div>
       )}
 
-      {/* The satellite-embedding operations, directly above the composer — where the eye
-          already is when you go to type. Above the transcript they scrolled off the top of a
-          long conversation and were never seen again.
+      {/* The satellite-embedding operations belong to the RS-EMBED DEMO tab and appear only
+          there. They sit directly above the composer, where the eye already is when you go to
+          type; above the transcript they scrolled off the top of a long conversation and were
+          never seen again. On that tab they are always on screen, disabled until a region
+          exists, with the two steps spelled out: the tab exists to SHOW what can be done, and a
+          hidden control demonstrates nothing.
 
-          On the RS-EMBED DEMO tab they are always on screen, disabled until a region exists,
-          with the two steps spelled out: that tab exists to SHOW what can be done, and a
-          hidden control demonstrates nothing. Elsewhere they still appear only once a region
-          is drawn — a permanently greyed row is clutter in a tab that is not about them. */}
-      {p.spatial && (p.tab === 'rs' || p.hasRegion) && (
-        <div className={`rspanel ${p.tab === 'rs' ? 'demo' : ''}`}>
-          {p.tab === 'rs' && (
-            <ol className="rssteps">
-              <li className={p.hasRegion ? 'done' : ''}>
-                {p.mapVisible ? 'Right-click or right-drag on the map to draw a region'
-                              : 'Open the map, then right-click or right-drag to draw a region'}
-              </li>
-              <li className={p.hasRegion ? '' : 'muted'}>Pick an operation</li>
-            </ol>
-          )}
+          They used to appear on the Chat tab too, once a region had been drawn. Drawing a
+          region is not the same as asking for satellite embeddings — you may have drawn it to
+          ask any other question about the place — and the panel then sat between the
+          conversation and the composer for the rest of the session. */}
+      {p.spatial && p.tab === 'rs' && (
+        <div className="rspanel demo">
+          <ol className="rssteps">
+            <li className={p.hasRegion ? 'done' : ''}>
+              {p.mapVisible ? 'Right-click or right-drag on the map to draw a region'
+                            : 'Open the map, then right-click or right-drag to draw a region'}
+            </li>
+            <li className={p.hasRegion ? '' : 'muted'}>Pick an operation</li>
+          </ol>
           <div className="rsrow">
-            {/* The numbered steps above already say what this row is, and at a 460px panel the
-                label costs 126px — exactly enough to push the fourth operation onto a second
-                line. Kept where there are no steps to explain it. */}
-            {p.tab !== 'rs' && <span className="rslabel">🛰 satellite embedding</span>}
             {rsActions(rsModels, rsYear, rsSeason).map((a) => (
               <button key={a.label} className={`rsbtn ${rsOp === a.label ? 'on' : ''}`}
                 disabled={p.busy || !p.hasRegion}
@@ -701,9 +697,11 @@ export function ChatPanel(p: Props) {
             </button>
           )}
         </div>
+        {/* Connection settings live on the top bar's gear alone now. Two entry points to one
+            dialog, one of them under the composer where it competed with the notice, was one
+            too many — and the notice is what belongs in the reading line under the box. */}
         <div className="footline">
-          <button className="conn" onClick={p.onToggleSettings}>⚙ Connection</button>
-          <span className="terms">I-GUIDE Platform Terms of Use apply. Smart Search can make mistakes. Always double-check.</span>
+          <span className="terms">I-GUIDE Platform Terms of Use apply. I-GUIDE AI Agent can make mistakes. Always double-check.</span>
         </div>
       </div>
     </section>

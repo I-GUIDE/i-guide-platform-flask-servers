@@ -735,7 +735,6 @@ export default function App() {
           onUpload={onUpload}
           onSetMode={setMode} onSetCfg={setCfg}
           onSetSpatial={setSpatial}
-          onToggleSettings={() => setShowSettings((s) => !s)}
         />
       </div>
     </div>

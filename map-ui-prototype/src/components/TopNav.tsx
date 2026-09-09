@@ -1,3 +1,5 @@
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+
 import { IGuideMark } from './IGuideMark';
 import { TopNavPlatform } from './TopNav.platform';
 import { isPlatformVariant, type AppTab } from '../uiVariant';
@@ -24,6 +26,41 @@ const TABS: { id: AppTab; label: string; title: string }[] = [
 // and the settings gear remain on the right: the jpy badge and the account avatar were platform
 // placeholders that did nothing here.
 function TopNavRsEmbed(p: TopNavProps) {
+  // One travelling lens rather than a background that blinks from one button to the other. The
+  // two labels are very different widths — "Chat" against "RS-Embed Demo" — so the lens resizes
+  // as it moves, which is where most of the liquid character comes from; it also stretches along
+  // the way and settles, the way a drop of glass would.
+  const navRef = useRef<HTMLElement>(null);
+  const [lens, setLens] = useState<{ x: number; w: number } | null>(null);
+  const [travelling, setTravelling] = useState(false);
+  const mounted = useRef(false);
+
+  useLayoutEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+    const measure = () => {
+      const on = nav.querySelector<HTMLButtonElement>('.tab.on');
+      if (on) setLens({ x: on.offsetLeft, w: on.offsetWidth });
+    };
+    measure();
+    // Webfonts land after first paint and the labels reflow with them, so a lens measured once
+    // keeps whatever width the fallback face happened to give it. The observer also covers the
+    // window being narrowed.
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(nav);
+    return () => ro.disconnect();
+  }, [p.tab]);
+
+  useEffect(() => {
+    // Not on the first render: there is no travel to animate when the page opens, and a lens
+    // that stretches on load reads as a glitch rather than as a material.
+    if (!mounted.current) { mounted.current = true; return; }
+    setTravelling(true);
+    const id = setTimeout(() => setTravelling(false), 460);
+    return () => clearTimeout(id);
+  }, [p.tab]);
+
   return (
     <header className="bar">
       <div className="bar-inner">
@@ -37,7 +74,23 @@ function TopNavRsEmbed(p: TopNavProps) {
         </div>
         {/* A demo surface, not a second app: the tabs choose what the page is SET UP for, and
             the conversation carries across both. */}
-        <nav className="tabs" role="tablist" aria-label="Workspace">
+        <nav className="tabs" role="tablist" aria-label="Workspace" ref={navRef}>
+          {/* Rendered only once measured, so it never flashes at the wrong width. Decorative:
+              the selected state is on the buttons, where a screen reader reads it. */}
+          {lens && (
+            /* Real values, not custom properties: a transition on a width/transform whose
+               value comes from an unregistered var() does not re-resolve when the var changes.
+               Chrome kept rendering the previous tab's 133px while --tab-w already read 57px,
+               so the lens never moved. Nothing needed them either — travel and stretch live on
+               two elements, so this transform is only ever a translate. */
+            <span className={`tabglass${travelling ? ' travelling' : ''}`} aria-hidden="true"
+                  style={{ transform: `translateX(${lens.x}px)`, width: `${lens.w}px` }}>
+              {/* Keyed on the tab so a second click restarts the stretch instead of finding the
+                  class already applied and doing nothing. The travel itself is on the parent, so
+                  remounting this does not interrupt it. */}
+              <span key={p.tab} className="tabglass-lens" />
+            </span>
+          )}
           {TABS.map((t) => (
             <button key={t.id} role="tab" type="button" title={t.title}
               aria-selected={p.tab === t.id}
