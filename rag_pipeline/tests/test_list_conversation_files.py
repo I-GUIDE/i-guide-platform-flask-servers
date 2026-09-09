@@ -139,3 +139,73 @@ def test_the_tool_is_registered_and_reachable(store):
     for intent in ("analysis_task", "code_task", "general_discovery", "hybrid"):
         assert "list_conversation_files" in select_allowed_tools(
             intent, ["keyword_search", "list_conversation_files"]), intent
+
+
+# --- the tool has to reach the peer that answers the question ------------------------------
+#
+# It did not. The full file toolset is attached only `if input_file_ids` — only on an upload
+# turn — and this conversation uploaded nothing: it made a boundary and an embedding. So the
+# analyse peer had no file tool at all, wrote `import os; os.listdir('.')` in execute_code, and
+# listed the sandbox working directory. The saved script it wrote to do it then appeared in the
+# answer as one of the conversation's artifacts.
+
+def _peer_tools(monkeypatch, which, input_file_ids=None):
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor import graph as g
+
+    captured = {}
+
+    def _fake_build(**kw):
+        captured["tools"] = [str(getattr(t, "name", ""))
+                             for t in (kw.get("preloaded_tools") or [])]
+        raise RuntimeError("far enough")
+
+    monkeypatch.setattr(ef, "build_agent_executor", _fake_build)
+    factory = g.default_analyze_fn if which == "analyze" else g.default_code_fn
+    try:
+        factory(llm=object(), input_file_ids=input_file_ids)(
+            "what files have you saved?", [], {"query": "q", "thread_id": "t1"})
+    except Exception:  # noqa: BLE001 - the spy raises to stop before the LLM call
+        pass
+    return set(captured.get("tools", []))
+
+
+@pytest.mark.parametrize("which", ["analyze", "code"])
+def test_the_peer_has_the_listing_with_no_upload(monkeypatch, which):
+    """The regression itself: no upload is the normal case, not the exceptional one."""
+    assert "list_conversation_files" in _peer_tools(monkeypatch, which)
+
+
+@pytest.mark.parametrize("which", ["analyze", "code"])
+def test_and_still_has_it_when_a_file_is_attached(monkeypatch, which):
+    """The upload path adds the full toolset, which carries this tool too — exactly once."""
+    assert "list_conversation_files" in _peer_tools(monkeypatch, which,
+                                                    input_file_ids=["file_abc"])
+
+
+def test_the_upload_path_does_not_bind_it_twice(monkeypatch):
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor import graph as g
+
+    captured = {}
+    monkeypatch.setattr(ef, "build_agent_executor",
+                        lambda **kw: captured.setdefault(
+                            "t", [str(getattr(t, "name", ""))
+                                  for t in (kw.get("preloaded_tools") or [])]))
+    try:
+        g.default_analyze_fn(llm=object(), input_file_ids=["file_abc"])(
+            "q", [], {"query": "q", "thread_id": "t1"})
+    except Exception:  # noqa: BLE001
+        pass
+    assert captured.get("t", []).count("list_conversation_files") == 1
+
+
+@pytest.mark.parametrize("prompt_name", ["ANALYSIS_WORKFLOW_PROMPT", "CODE_PEER_PROMPT"])
+def test_the_prompt_says_to_ask_the_store_not_the_sandbox(prompt_name):
+    """A bound tool the prompt never mentions does not get used — and here the peer had a
+    working alternative it preferred. The rule has to name that alternative to rule it out."""
+    from agent_runtime.supervisor import prompts
+
+    text = getattr(prompts, prompt_name)
+    assert "list_conversation_files" in text
+    assert "working directory" in text

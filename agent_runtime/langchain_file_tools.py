@@ -329,8 +329,22 @@ def make_langchain_file_tools() -> List[Any]:
     ]
 
 
+def make_conversation_file_tools() -> List[Any]:
+    """Just the listing, for turns with no upload.
+
+    The full file toolset is attached only when the user uploaded something, which is the wrong
+    condition for this one tool: a turn creates files without any upload — a boundary, an
+    embedding, a plot — and it is exactly then that "what did you save?" gets asked. Without it
+    the analyse peer reached for `execute_code` and listed the sandbox working directory instead,
+    inventing its own scratch script as one of the conversation's artifacts.
+    """
+    tools = make_langchain_file_tools()
+    return [t for t in tools if str(getattr(t, "name", "")) == "list_conversation_files"]
+
+
 __all__ = [
     "inspect_file_for_analysis_tool",
+    "make_conversation_file_tools",
     "list_conversation_files_tool",
     "make_langchain_file_tools",
     "read_text_file_tool",

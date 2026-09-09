@@ -3104,6 +3104,19 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                              if str(getattr(t, "name", "")) in _MAP_DELIVERY_TOOLS)
         except Exception:
             pass
+        # The conversation's own file listing, on EVERY turn — not gated on an upload like the
+        # rest of the file toolset. Files get created without one (a boundary, an embedding, a
+        # plot), and that is precisely when "what have you saved?" is asked. Ungated, the peer
+        # answered it out of `execute_code` and listed the sandbox working directory. When an
+        # upload IS present the full toolset below carries this tool already, so add it only in
+        # the other case and no dedup is needed.
+        if not input_file_ids:
+            try:
+                from agent_runtime.langchain_file_tools import make_conversation_file_tools
+
+                tools.extend(make_conversation_file_tools())
+            except Exception:  # noqa: BLE001 - one optional tool must not break the peer
+                pass
         if input_file_ids:
             from agent_runtime.langchain_file_tools import make_langchain_file_tools
 
@@ -3589,6 +3602,17 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 tools.extend(t for t in make_langchain_geo_tools(default_input_file_ids=None)
                              if str(getattr(t, "name", "")) in _MAP_DELIVERY_TOOLS)
         except Exception:
+            pass
+        # The conversation's own file listing, on EVERY turn — not gated on an upload like the
+        # rest of the file toolset. Files get created without one (a boundary, an embedding, a
+        # plot), and that is precisely when "what have you saved?" is asked. Ungated, the peer
+        # answered it out of `execute_code` and listed the sandbox working directory. When an
+        # This peer never attaches that toolset at all, so there is nothing to gate against.
+        try:
+            from agent_runtime.langchain_file_tools import make_conversation_file_tools
+
+            tools.extend(make_conversation_file_tools())
+        except Exception:  # noqa: BLE001 - one optional tool must not break the peer
             pass
         if input_file_ids:
             try:
