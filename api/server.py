@@ -647,8 +647,6 @@ def agent_models():
     """
     from agent_runtime.executor_factory import list_available_models
 
-    from agent_runtime.executor_factory import list_available_models
-
     try:
         catalogue = list_available_models()
     except Exception as exc:  # never let a catalogue lookup break the page
@@ -2080,6 +2078,16 @@ def agent_chat_stream():
                         "mcp_call_start",
                         "mcp_call_end",
                         "mcp_call_error",
+                        # The error-and-repair story. Without these three the trace shows a tool
+                        # being called twice and never says the first attempt failed, which is
+                        # how a 1.6s rejection read as a duplicate tile sweep for two rounds of
+                        # diagnosis. tool_dead_end is not new — the supervisor has emitted it
+                        # whenever a tool failed twice and it re-ran the peer with an
+                        # observation, and it was dropped HERE, so the one repair mechanism the
+                        # agent already had has never been visible to anyone watching.
+                        "tool_retry",
+                        "tool_recovered",
+                        "tool_dead_end",
                     }:
                         yield _sse_event("agent_trace", _agent_trace_event(payload))
 

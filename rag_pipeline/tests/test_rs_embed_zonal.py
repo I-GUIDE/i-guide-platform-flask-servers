@@ -1049,3 +1049,114 @@ def test_the_memo_sees_a_month_and_its_date_as_one_call(in_a_turn):
     # embed_zones normalises before keying, so both spellings resolve to one entry.
     assert T._zone_memo_key(**_memo_call(start="2022-06-01", end="2022-09-30")) != as_month, (
         "the helper normalises at the call site, not inside _zone_memo_key")
+
+
+# --- the trace says what came back, not only that something was called ---------
+def test_a_failure_is_the_headline():
+    """The line this whole change exists for. A tool failing in 1.6s and being retried looked
+
+    exactly like the same tool running twice, because the trace showed calls and never results —
+    two wrong diagnoses came out of that in one afternoon.
+    """
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    out = _outcome(_json.dumps({"ok": False,
+                                "error": "SpecError: TemporalSpec.range expects ISO dates."}))
+    assert out.startswith("failed — ")
+    assert "TemporalSpec" in out
+
+
+def test_a_count_is_reported_with_its_noun():
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    assert _outcome(_json.dumps({"ok": True, "count": 8})) == "8 results"
+    assert _outcome(_json.dumps({"ok": True, "count": 1})) == "1 result"
+    assert _outcome(_json.dumps({"ok": True, "count": 0})) == "0 results"
+
+
+def test_zero_results_is_said_rather_than_omitted():
+    """A search that found nothing is the single most useful thing the line can report."""
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    assert _outcome(_json.dumps({"ok": True, "count": 0})) == "0 results"
+    assert _outcome(_json.dumps({"ok": True, "documents": []})) == "0 documents"
+
+
+def test_layers_and_files_have_their_own_headline():
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    assert _outcome(_json.dumps({"ok": True, "map_layers": [1, 2, 3]})) == "3 layers on the map"
+    assert _outcome(_json.dumps({"ok": True, "map_layer": {"id": "x"}})) == "1 layer on the map"
+    assert _outcome(_json.dumps({"ok": True, "filename": "urbana.npz"})) == "urbana.npz"
+
+
+def test_an_unrecognised_shape_says_nothing_rather_than_guessing():
+    """Returning None leaves the duration, which is still worth having. Inventing a summary for
+
+    a shape the tools do not produce would put a wrong number in the one line a reader trusts.
+    """
+    from agent_runtime.streaming_trace import _outcome
+
+    assert _outcome("not json at all") is None
+    assert _outcome(None) is None
+    assert _outcome('{"something": "unfamiliar"}') is None
+
+
+def test_the_repair_story_is_emitted(monkeypatch):
+    """A failure, a retry naming it, and a recovery saying how many attempts it took.
+
+    One retry sits BELOW the dead-end detector's threshold of two, so without these events a
+    turn that quietly needed a second attempt reports nothing at all — which is how a format
+    mismatch between two sibling tools survived unnoticed.
+    """
+    import agent_runtime.streaming_trace as ST
+
+    seen = []
+    handler = ST.StreamingTraceCallbackHandler.__new__(ST.StreamingTraceCallbackHandler)
+    handler._lock = __import__("threading").Lock()
+    handler._tool_runs = {}
+    handler._tool_failures = {}
+    handler._state = None
+    monkeypatch.setattr(handler, "_emit", lambda ev, data: seen.append((ev, data)))
+
+    handler.on_tool_start({"name": "embed_zones"}, "{}", run_id="r1")
+    handler.on_tool_end('{"ok": false, "error": "SpecError: expects ISO dates"}', run_id="r1")
+    handler.on_tool_start({"name": "embed_zones"}, "{}", run_id="r2")
+    handler.on_tool_end('{"ok": true, "zones_with_pixels": 1}', run_id="r2")
+
+    kinds = [ev for ev, _ in seen]
+    assert "tool_retry" in kinds, "the second call must say what it is retrying"
+    assert "tool_recovered" in kinds, "a success after a failure must not pass silently"
+
+    retry = next(d for ev, d in seen if ev == "tool_retry")
+    assert "SpecError" in retry["message"], "the retry names the error it is retrying"
+    recovered = next(d for ev, d in seen if ev == "tool_recovered")
+    assert recovered["attempts"] == 2
+    assert "attempt 2" in recovered["message"]
+
+
+def test_a_clean_run_says_nothing_about_repair(monkeypatch):
+    """No failure, no retry line, no recovery line — the common case stays quiet."""
+    import agent_runtime.streaming_trace as ST
+
+    seen = []
+    handler = ST.StreamingTraceCallbackHandler.__new__(ST.StreamingTraceCallbackHandler)
+    handler._lock = __import__("threading").Lock()
+    handler._tool_runs = {}
+    handler._tool_failures = {}
+    handler._state = None
+    monkeypatch.setattr(handler, "_emit", lambda ev, data: seen.append((ev, data)))
+
+    handler.on_tool_start({"name": "keyword_search"}, "{}", run_id="r1")
+    handler.on_tool_end('{"ok": true, "count": 8}', run_id="r1")
+    kinds = [ev for ev, _ in seen]
+    assert "tool_retry" not in kinds and "tool_recovered" not in kinds
+    assert next(d for ev, d in seen if ev == "tool_result")["outcome"] == "8 results"

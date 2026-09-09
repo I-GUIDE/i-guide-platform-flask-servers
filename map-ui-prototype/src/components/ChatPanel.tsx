@@ -192,6 +192,25 @@ function Sources({ response }: { response: any }) {
   );
 }
 
+/** What the transcript SHOWS, folded from what it stored.
+ *
+ * A ReAct round emits an "asking the model" line before every tool call, so the ladder of them
+ * was the most frequent line in the trace and the least informative — eight identical rows
+ * naming the same model, between the rows that said what actually happened. Only the first
+ * survives here: it names the model, which is worth stating once and nothing after that.
+ *
+ * Folded at RENDER, not at ingest. The array keeps every event, so the stored transcript stays
+ * complete and a later reader is not looking at an edited record. */
+function foldTrace(trace: TraceLine[]): TraceLine[] {
+  let seenModelLine = false;
+  return trace.filter((t) => {
+    if (t.kind !== 'llm') return true;
+    if (seenModelLine) return false;
+    seenModelLine = true;
+    return true;
+  });
+}
+
 function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) => string }) {
   const imgs = (m.artifacts || []).filter(isImg).filter((f) => !(m.html || '').includes(f.file_id));
   const files = (m.artifacts || []).filter((f) => !isImg(f));
@@ -201,8 +220,10 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
       <div className="ai-label">I-GUIDE AI{m.streaming && <span className="spin" />}</div>
       {m.trace && m.trace.length > 0 && (
         <details className="reason" open={m.streaming}>
-          <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${m.trace.length} steps`}</span><span className="chev">▾</span></summary>
-          <div className="body">{m.trace.map((t, j) => <div key={j} className={`ln ${t.kind || ''}`}>{t.text}</div>)}</div>
+          {/* The tally counts what is SHOWN. Counting the stored array called a turn with seven
+              tool calls "28 steps", most of them the folded model lines. */}
+          <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${foldTrace(m.trace).length} steps`}</span><span className="chev">▾</span></summary>
+          <div className="body">{foldTrace(m.trace).map((t, j) => <div key={j} className={`ln ${t.kind || ''}`}>{t.text}</div>)}</div>
         </details>
       )}
       {(hasBody || imgs.length > 0 || m.response) && (

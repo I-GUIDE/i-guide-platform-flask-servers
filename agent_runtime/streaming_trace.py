@@ -8,6 +8,7 @@ LangChain callbacks, MCP tool wrappers, and that queue.
 from __future__ import annotations
 
 import json
+import time
 import logging
 import os
 from contextlib import contextmanager
@@ -84,6 +85,67 @@ _TRACE_AGENT: ContextVar[str] = ContextVar("agent_stream_trace_agent", default="
 # import, so set the env before importing this module).
 _TEXT_LIMIT = int(os.environ.get("AGENT_TRACE_TEXT_LIMIT") or 1200)
 _JSON_LIMIT = int(os.environ.get("AGENT_TRACE_JSON_LIMIT") or 3000)
+
+
+def _outcome(output: Any) -> Optional[str]:
+    """What a tool RETURNED, in a few words, or None when it cannot be said briefly.
+
+    The trace showed that a tool was called and never what came back, so a search finding eight
+    documents, a search finding none, and a search that failed all rendered as the same single
+    line. Two wrong diagnoses in one afternoon came out of that: a tool failing in a second and
+    being retried looked exactly like the same tool running twice.
+
+    Deliberately a HEADLINE, not the payload — the truncated result content is already available
+    to anyone who wants it, and a trace that prints result bodies is the noise this line has to
+    stay clear of. Reads the fields the tools already set; returns None rather than inventing a
+    summary for a shape it does not recognise, in which case the caller still has the duration.
+    """
+    body = output
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            return None
+    if not isinstance(body, dict):
+        return None
+
+    # A failure first, and never silently: this is the case the line exists for. Four shapes,
+    # because the tools do not agree on one — execute_code reports an exit code and a timeout
+    # flag, the service tools an `ok` flag, and some return a bare `error`.
+    failed = (body.get("ok") is False
+              or body.get("timed_out") is True
+              or (body.get("exit_code") not in (None, 0))
+              or (body.get("error") and body.get("ok") is not True))
+    if failed:
+        reason = body.get("error") or body.get("detail") or body.get("stderr") or body.get("hint")
+        if not reason and body.get("timed_out"):
+            reason = "timed out"
+        if not reason and body.get("exit_code") not in (None, 0):
+            reason = f"exit code {body['exit_code']}"
+        return f"failed — {_short_text(reason or 'failed', limit=140)}"
+
+    # `count` is what every search tool's _build_payload already reports.
+    for key in ("count", "feature_count", "zones_with_pixels", "row_count"):
+        value = body.get(key)
+        if isinstance(value, int):
+            noun = {"count": "result", "feature_count": "feature",
+                    "zones_with_pixels": "zone with pixels", "row_count": "row"}[key]
+            return f"{value:,} {noun}{'' if value == 1 else 's'}"
+    for key in ("documents", "results", "matched"):
+        value = body.get(key)
+        if isinstance(value, list):
+            return f"{len(value):,} {key.rstrip('s')}{'' if len(value) == 1 else 's'}"
+
+    layers = body.get("map_layers")
+    if isinstance(layers, list) and layers:
+        return f"{len(layers)} layers on the map"
+    if isinstance(body.get("map_layer"), dict):
+        return "1 layer on the map"
+    if body.get("filename"):
+        return _short_text(body["filename"], limit=60)
+    if body.get("ok") is True:
+        return "ok"
+    return None
 
 
 def _short_text(value: Any, *, limit: Optional[int] = None) -> str:
@@ -224,6 +286,9 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         super().__init__()
         self._state: Optional[_TraceState] = None
         self._tool_runs: Dict[str, Dict[str, Any]] = {}
+        # tool name -> {"error": str, "attempts": int}. Per HANDLER, which is per turn, so a
+        # failure never colours a later conversation. Cleared when the tool succeeds.
+        self._tool_failures: Dict[str, Dict[str, Any]] = {}
         self._lock = Lock()
 
     def _tool_run_key(self, run_id: Any) -> str:
@@ -314,7 +379,22 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         args = _normalize_tool_args(input_str)
         run_key = self._tool_run_key(kwargs.get("run_id"))
         with self._lock:
-            self._tool_runs[run_key] = {"name": tool_name, "args": args}
+            self._tool_runs[run_key] = {"name": tool_name, "args": args,
+                                        "started": time.monotonic()}
+            prior = self._tool_failures.get(tool_name)
+        # THE REPAIR, said out loud. A tool that fails and is immediately retried is the single
+        # most misleading thing this trace could show, because two calls of one tool render
+        # identically whether the first worked or not — that is exactly how a 1.6-second
+        # rejection read as a duplicate tile sweep for two rounds of diagnosis. One retry is
+        # also below the dead-end detector's threshold of two, so nothing else reports it.
+        if prior:
+            self._emit(
+                "tool_retry",
+                {"kind": "tool_retry", "label": "Retrying", "name": tool_name,
+                 "attempt": prior["attempts"] + 1,
+                 "message": f"retrying {tool_name} after: "
+                            f"{_short_text(prior['error'], limit=140)}"},
+            )
         self._emit(
             "tool_call",
             {
@@ -332,17 +412,48 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         with self._lock:
             meta = self._tool_runs.pop(run_key, {})
         tool_name = str(meta.get("name") or kwargs.get("name") or "unknown_tool")
-        self._emit(
-            "tool_result",
-            {
-                "kind": "tool_result",
-                "label": f"Tool result {tool_name}",
-                "tool_name": tool_name,
-                "name": tool_name,
-                "content": _short_text(output),
-                "message": _short_text(output),
-            },
-        )
+        # The HEADLINE goes out beside the content: `outcome` is what the trace line says, and
+        # `duration_s` is what makes a fast failure distinguishable from a real run — the two
+        # facts that were missing when a 1.6-second rejection read as a duplicate tile sweep.
+        outcome = _outcome(output)
+        started = meta.get("started")
+        duration = round(time.monotonic() - started, 2) if isinstance(started, float) else None
+        payload: Dict[str, Any] = {
+            "kind": "tool_result",
+            "label": f"Tool result {tool_name}",
+            "tool_name": tool_name,
+            "name": tool_name,
+            "content": _short_text(output),
+            "message": _short_text(output),
+        }
+        if outcome:
+            payload["outcome"] = outcome
+        if duration is not None:
+            payload["duration_s"] = duration
+        self._emit("tool_result", payload)
+
+        # Track the failure/repair pair so the NEXT call can name what it is retrying, and so a
+        # success after a failure is reported as a recovery rather than passing silently. A turn
+        # that quietly needed two attempts is a turn whose tool contract is wrong, and that is
+        # worth seeing: one retry sits below the dead-end detector's threshold of two.
+        failed = bool(outcome and outcome.startswith("failed"))
+        with self._lock:
+            prior = self._tool_failures.get(tool_name)
+            if failed:
+                self._tool_failures[tool_name] = {
+                    "error": (outcome or "")[len("failed — "):] or "failed",
+                    "attempts": (prior or {}).get("attempts", 0) + 1}
+            elif prior:
+                self._tool_failures.pop(tool_name, None)
+        if not failed and prior:
+            attempts = prior["attempts"] + 1
+            self._emit(
+                "tool_recovered",
+                {"kind": "tool_recovered", "label": "Recovered", "name": tool_name,
+                 "attempts": attempts,
+                 "message": f"{tool_name} succeeded on attempt {attempts} — "
+                            f"the first failed with: {_short_text(prior['error'], limit=120)}"},
+            )
         # Geometry-bearing results (e.g. overpass_search) also stream as an untruncated
         # `map_layer` event so a map client can plot them live; the `content` above is
         # truncated and not reliably parseable.

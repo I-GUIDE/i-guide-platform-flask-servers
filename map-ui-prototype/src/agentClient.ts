@@ -316,11 +316,37 @@ export async function streamChat(
       case 'tool_result': {
         const name = p.tool_name || p.name || 'tool';
         const rawContent = p.content !== undefined ? p.content : p.message;
+        // The trace used to show that a tool was CALLED and never what came back, so a search
+        // finding eight documents, one finding none, and one that failed all rendered
+        // identically. The server now sends a headline and a duration; this is the line.
+        const bits = [p.outcome, typeof p.duration_s === 'number' ? `${p.duration_s}s` : null]
+          .filter(Boolean);
+        if (bits.length) h.onTrace?.({ text: bits.join(' · '), kind: 'result' });
         h.onToolResult?.(name, parseMaybeJson(rawContent), rawContent);
+        break;
+      }
+      // Tagged so the transcript can fold the ladder of these away at render while keeping
+      // every one of them in the stored array. Untagged they arrived via the default branch
+      // and were indistinguishable from any other status line.
+      case 'llm_start': {
+        const msg = p.message || p.detail?.message;
+        if (msg) h.onTrace?.({ text: String(msg), kind: 'llm' });
         break;
       }
       case 'tool_error':
         h.onTrace?.({ text: `${p.tool_name || p.name || 'tool'} failed: ${p.message || 'error'}`, kind: 'warn' });
+        break;
+      // The repair story. Without these the transcript shows a tool called twice and never says
+      // the first attempt failed — the reader cannot tell a retry from a duplicate.
+      case 'tool_retry':
+      case 'tool_dead_end':
+        if (p.message) h.onTrace?.({ text: String(p.message), kind: 'warn' });
+        break;
+      case 'tool_recovered':
+        if (p.message) h.onTrace?.({ text: String(p.message), kind: 'recovered' });
+        break;
+      case 'llm_error':
+        if (p.message) h.onTrace?.({ text: String(p.message), kind: 'warn' });
         break;
       case 'answer': {
         const t = p.final_answer || p.answer || p.detail?.final_answer || p.detail?.answer;

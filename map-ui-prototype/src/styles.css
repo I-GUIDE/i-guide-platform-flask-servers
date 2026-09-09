@@ -198,6 +198,18 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .reason .body .ln::before { content: "– "; color: #b7bcc2; }
 .reason .body .ln.tool { color: #3b4046; font-weight: 600; }
 .reason .body .ln.tool::before { content: "→ "; color: var(--brand); }
+/* What a tool RETURNED, under the → line that called it. Indented and quieter than the call:
+   the call is the decision, this is its consequence, and a reader scanning for what happened
+   wants them paired rather than competing. A failure colours itself through .ln.warn's palette
+   only when the tool actually failed — the text says "failed —" and that is enough. */
+.reason .body .ln.result { color: #6b7280; padding-left: 14px; }
+.reason .body .ln.result::before { content: "\2190 "; color: #9aa0a6; }
+/* A tool that failed and then worked. Green rather than red: the turn recovered, and colouring
+   it as an error would train the reader to ignore the reds that matter. It still has to APPEAR —
+   a turn that quietly needed two attempts is a turn whose tool contract is wrong, and one retry
+   sits below the dead-end detector's threshold of two, so nothing else reports it. */
+.reason .body .ln.recovered { color: #1f7a4d; }
+.reason .body .ln.recovered::before { content: "\21ba "; color: #1f7a4d; }
 .reason .body .ln.warn { color: #a4453a; }
 .reason .body .ln.warn::before { content: "! "; color: #a4453a; }
 .reason .body .ln.routing, .reason .body .ln.route { color: #3b4046; font-weight: 600; }
