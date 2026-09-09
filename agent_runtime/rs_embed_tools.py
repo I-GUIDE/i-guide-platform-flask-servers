@@ -351,8 +351,20 @@ def _layer_label(base: str, tag: str) -> str:
     on the map. The part that VARIES has to sit where truncation cannot reach it.
 
     ``base`` alone when there is nothing to disambiguate, so one-run labels stay clean.
+
+    A word the TAG already carries is dropped from the front of ``base``. The model names its
+    own layers, and it names them descriptively — "Urbana city — gse — Jun–Sep 2022" — so
+    prepending that to "gse pixel embedding in zones" produced "…— gse — Jun–Sep 2022 — gse
+    pixel embedding in zones", saying gse twice in a name the panel then clips. Only the
+    leading token is considered: "gse" repeated is noise, but a "zones" or "change" later in
+    the description is load-bearing and stays.
     """
-    return f"{tag} \u2014 {base}" if tag else base
+    if not tag:
+        return base
+    head, _, rest = base.partition(" ")
+    if head and rest and head.lower() in tag.lower().split():
+        base = rest
+    return f"{tag} \u2014 {base}"
 
 
 # Pixels the shared PCA basis is FITTED on. Projection is never subsampled; this only
@@ -1684,7 +1696,10 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                              # to tell apart, k is always 1, and the layer is the input polygon
                              # with three attributes added.
                              "id": boundary_layer_id(file_id),
-                             "label": f"{place} — {model} embedded",
+                             # Through _layer_label so it gets the same de-duplication: the
+                             # model names these layers itself and usually puts the model in
+                             # the name, which would otherwise read "… — gse — … — gse embedded".
+                             "label": _layer_label(f"{model} embedded", place),
                              # Outline, not fill: this layer sits over the pixel image of the
                              # same polygon, and a filled one covers the picture it frames.
                              "render": "shapes", "outline": True,

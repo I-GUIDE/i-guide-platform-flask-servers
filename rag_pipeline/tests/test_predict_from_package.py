@@ -599,3 +599,42 @@ def test_the_boundary_layer_carries_that_id():
     assert built is not None
     assert built["id"] == "boundary-file_poly1"
     assert built["outline"] is True
+
+
+def test_a_label_does_not_say_the_model_twice():
+    """The model names its own layers descriptively, and usually puts the model in the name.
+
+    Prepending "Urbana city — gse — Jun–Sep 2022" to "gse pixel embedding in zones" said gse
+    twice, in a name the layer panel then clips with an ellipsis.
+    """
+    from agent_runtime.rs_embed_tools import _layer_label
+
+    assert _layer_label("gse pixel embedding in zones", "Urbana city — gse — Jun–Sep 2022") \
+        == "Urbana city — gse — Jun–Sep 2022 — pixel embedding in zones"
+
+
+def test_a_label_keeps_the_model_when_the_tag_lacks_it():
+    """Only a REPEAT is dropped. A tag that never names the model still needs it."""
+    from agent_runtime.rs_embed_tools import _layer_label
+
+    assert _layer_label("gse embedding (PCA-RGB)", "40.113,-88.231") \
+        == "40.113,-88.231 — gse embedding (PCA-RGB)"
+
+
+def test_only_the_leading_word_is_dropped():
+    """A word later in the description is load-bearing — 'zones', 'change', a k — and stays."""
+    from agent_runtime.rs_embed_tools import _layer_label
+
+    assert _layer_label("gse zone groups (k=6)", "Drawn Champaign region") \
+        == "Drawn Champaign region — gse zone groups (k=6)"
+
+
+def test_the_match_is_an_exact_token_not_a_prefix():
+    """'zone' is not 'zones'. Matching loosely would eat a word that carries meaning and
+
+    leave "gse zones — groups (k=6)", which reads as groups of nothing. When in doubt the
+    duplicate is the cheaper mistake: it is ugly, where a wrong trim is misleading.
+    """
+    from agent_runtime.rs_embed_tools import _layer_label
+
+    assert _layer_label("zone groups (k=6)", "gse zones") == "gse zones — zone groups (k=6)"
