@@ -100,7 +100,12 @@ def _outcome(output: Any) -> Optional[str]:
     stay clear of. Reads the fields the tools already set; returns None rather than inventing a
     summary for a shape it does not recognise, in which case the caller still has the duration.
     """
-    body = output
+    # Unwrap first. LangChain hands on_tool_end a ToolMessage in some versions and the raw
+    # string in others; _short_text stringifies either, which is why `content` was right while
+    # the outcome came back empty and the trace line showed a duration and nothing else.
+    body = getattr(output, "content", output)
+    if isinstance(body, (bytes, bytearray)):
+        body = body.decode("utf-8", "replace")
     if isinstance(body, str):
         try:
             body = json.loads(body)

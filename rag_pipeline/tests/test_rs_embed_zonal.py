@@ -1160,3 +1160,20 @@ def test_a_clean_run_says_nothing_about_repair(monkeypatch):
     kinds = [ev for ev, _ in seen]
     assert "tool_retry" not in kinds and "tool_recovered" not in kinds
     assert next(d for ev, d in seen if ev == "tool_result")["outcome"] == "8 results"
+
+
+def test_a_toolmessage_is_unwrapped_before_it_is_read():
+    """LangChain hands on_tool_end a ToolMessage in some versions and a raw string in others.
+
+    _short_text stringifies either, so `content` looked right while the outcome came back empty
+    and the trace line showed a bare duration — caught only by watching a real turn.
+    """
+    from agent_runtime.streaming_trace import _outcome
+
+    class ToolMessage:
+        def __init__(self, content):
+            self.content = content
+
+    assert _outcome(ToolMessage('{"documents": [1, 2, 3]}')) == "3 documents"
+    assert _outcome(ToolMessage('{"ok": false, "error": "boom"}')) == "failed — boom"
+    assert _outcome(b'{"count": 8}') == "8 results"
