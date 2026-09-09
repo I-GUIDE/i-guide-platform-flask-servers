@@ -1807,9 +1807,16 @@ def test_decider_knows_embedding_is_analyze_not_search():
     assert "remote-sensing foundation-model embeddings" in p
     # The claim, not its wording: model names are arguments, not things to go and find.
     assert "ARGUMENTS" in p and "not datasets to retrieve" in p
-    # And the router must say the operations are COMPOSED, or it hands the peer work as though
-    # a one-shot segment/change/predict tool were still there to call.
-    assert "execute_code" in p and "no one-shot segment/change/predict tool" in p
+    # Both routes, and in the right order of preference. The one-shot tools exist and work on
+    # the NATIVE grid server-side; composition is the fallback for what they cannot express, and
+    # it clusters the EXPORTED grid, decimated to a cell budget. A router that named only
+    # composition sent every segmentation through the coarser path.
+    assert "segmenting it into look-alike zones" in p, "the one-shot route must be offered"
+    assert "cannot express" in p, "composition must be offered as the fallback it is"
+    # And it must say composition depends on code execution, which the one-shot tools do not:
+    # execute_code is bound behind a flag, so promising it unconditionally is a promise the
+    # peer cannot always keep.
+    assert "needs code execution" in p
 
 
 def test_analysis_hints_cover_embedding_vocabulary():

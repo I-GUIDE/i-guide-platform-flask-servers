@@ -202,6 +202,14 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
    the call is the decision, this is its consequence, and a reader scanning for what happened
    wants them paired rather than competing. A failure colours itself through .ln.warn's palette
    only when the tool actually failed — the text says "failed —" and that is enough. */
+/* A clamped row is clickable and says so on hover. The chevron sits in the gutter so it does
+   not shift the text when the row opens — a transcript that reflows as you read it is worse
+   than one that is too short. */
+.reason .body .ln.clampable { cursor: pointer; position: relative; padding-right: 14px; }
+.reason .body .ln.clampable:hover { background: rgba(16, 24, 40, .04); border-radius: 4px; }
+.reason .body .ln.clampable::after { content: "⌄"; position: absolute; right: 2px; color: #9aa0a6; }
+.reason .body .ln.clampable.open::after { content: "⌃"; }
+.reason .body .ln.clampable.open { white-space: pre-wrap; }
 .reason .body .ln.result { color: #6b7280; padding-left: 14px; }
 .reason .body .ln.result::before { content: "\2190 "; color: #9aa0a6; }
 /* A tool that failed and then worked. Green rather than red: the turn recovered, and colouring

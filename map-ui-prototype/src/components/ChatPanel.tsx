@@ -211,6 +211,30 @@ function foldTrace(trace: TraceLine[]): TraceLine[] {
   });
 }
 
+// How much of a trace line shows before it is clamped. A traceback or a tool's argument dict
+// runs to hundreds of characters, and a transcript where every row is a paragraph is unreadable
+// — but the interesting half of a stack trace is the part that got cut. Clamped, clickable.
+const TRACE_CLAMP = 140;
+
+function TraceRow({ line }: { line: TraceLine }) {
+  const [open, setOpen] = useState(false);
+  const long = line.text.length > TRACE_CLAMP;
+  return (
+    <div
+      className={`ln ${line.kind || ''}${long ? ' clampable' : ''}${open ? ' open' : ''}`}
+      onClick={long ? () => setOpen((v) => !v) : undefined}
+      role={long ? 'button' : undefined}
+      tabIndex={long ? 0 : undefined}
+      onKeyDown={long ? (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); }
+      } : undefined}
+      title={long ? (open ? 'Collapse' : 'Show the whole message') : undefined}
+    >
+      {open || !long ? line.text : `${line.text.slice(0, TRACE_CLAMP)}…`}
+    </div>
+  );
+}
+
 function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) => string }) {
   const imgs = (m.artifacts || []).filter(isImg).filter((f) => !(m.html || '').includes(f.file_id));
   const files = (m.artifacts || []).filter((f) => !isImg(f));
@@ -223,7 +247,7 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
           {/* The tally counts what is SHOWN. Counting the stored array called a turn with seven
               tool calls "28 steps", most of them the folded model lines. */}
           <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${foldTrace(m.trace).length} steps`}</span><span className="chev">▾</span></summary>
-          <div className="body">{foldTrace(m.trace).map((t, j) => <div key={j} className={`ln ${t.kind || ''}`}>{t.text}</div>)}</div>
+          <div className="body">{foldTrace(m.trace).map((t, j) => <TraceRow key={j} line={t} />)}</div>
         </details>
       )}
       {(hasBody || imgs.length > 0 || m.response) && (

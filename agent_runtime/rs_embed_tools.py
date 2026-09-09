@@ -29,7 +29,7 @@ import tempfile
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,25 @@ _ZONE_MEMO: "OrderedDict[str, Tuple[float, str]]" = OrderedDict()
 _ZONE_MEMO_TTL_S = float(os.getenv("RS_EMBED_ZONE_MEMO_TTL_S", "1800"))
 _ZONE_MEMO_MAX = 32
 _ZONE_SCOPE_SEQ = itertools.count(1)
+
+
+def _as_list(value: Any) -> Optional[List[str]]:
+    """One name or several, however the model wrote it.
+
+    A parameter typed List[str] is rejected by pydantic BEFORE the function runs when the model
+    passes a bare string — observed live as `ValidationError: models Input should be a valid
+    list [input_value='gse', input_type=str]`, a whole wasted round trip for a request that was
+    perfectly clear. Writing models="gse" for one model is the natural thing to write, so the
+    signatures accept it and this normalises it. Comma-separated too: it is what a model reaches
+    for next, and splitting it here is cheaper than another rejection.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [str(value)]
 
 
 def _iso_date(value: Optional[str], *, month_end: bool = False) -> Optional[str]:
@@ -574,7 +593,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
     def embed_region(bbox: Optional[List[float]] = None, lon: Optional[float] = None,
                      lat: Optional[float] = None, file_id: Optional[str] = None,
-                     models: Optional[List[str]] = None, start: str = "2022-06",
+                     models: Optional[Union[str, List[str]]] = None, start: str = "2022-06",
                      end: str = "2022-09", buffer_m: float = _DEFAULT_BUFFER_M,
                      name: Optional[str] = None) -> str:
         """Embed a RECTANGLE with remote-sensing foundation models and PUT THE RESULT ON THE MAP.
@@ -602,16 +621,21 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         only for POINT layers; for polygons use embed_zones, which keeps their shape.
         `start`/`end` are months, "YYYY-MM".
 
-        COMPOSING FROM THE PACKAGE. There is no segment or change tool: the embedding is the
-        primitive and clustering it, or differencing it across periods, is code over the .npz
-        this saves. PREDICTION IS DIFFERENT — do not write code for it. The trained heads live on
-        the service and are never exported, so predict_from_package is the only route to them;
-        list_prediction_heads says what has been trained. Two more tools do work you would
-        otherwise write badly: align_embedding_colors puts several regions on ONE shared colour
-        basis (fitting a PCA per region and comparing the colours is the mistake it exists to
-        prevent), and list_embedding_packages finds a package saved in an earlier turn when the
-        file_id is no longer to hand — predict_from_package and align_embedding_colors both take
-        a filename as well as an id.
+        COMPOSING FROM THE PACKAGE — the second route, not the only one. segment_region,
+        embedding_change and predict_for_region do the common cases in ONE call, server-side, on
+        the NATIVE grid: prefer them when they fit, because the package exports a grid decimated
+        to a cell budget (stride 2 at the default footprint), so clustering it in code clusters
+        every second pixel. Compose when the tool cannot express what was asked — a k it does not
+        take, a metric of your own, more than two periods, a per-pixel change surface — and say
+        that the composed result is at the exported resolution.
+
+        Some work has a tool and must not be written by hand. The trained heads live on the
+        service and are never exported, so predict_from_package is the only route to them and
+        list_prediction_heads says what has been trained. align_embedding_colors puts several
+        regions on ONE shared colour basis; fitting a PCA per region and comparing the colours is
+        the mistake it exists to prevent. list_embedding_packages finds a package saved in an
+        earlier turn when the file_id is no longer to hand — it and predict_from_package both
+        take a filename as well as an id.
 
         Stage the package into execute_code by passing `embedding_package.file_id` in
         `input_files` — a file_id an earlier TOOL produced works, not just an upload. Staging has
@@ -650,7 +674,9 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         avail = _svc("/api/models", method="GET")
         if avail.get("error"):
             return json.dumps({"ok": False, **avail})
-        chosen = [str(m) for m in (models or ["gse"])][:_MAX_MODELS_PER_CALL]
+        # _as_list, not a comprehension: a bare "gse" would iterate CHARACTERS and ask the
+        # service for models g, s and e.
+        chosen = (_as_list(models) or ["gse"])[:_MAX_MODELS_PER_CALL]
         bad = _model_error(chosen, avail.get("models") or [])
         if bad:
             return json.dumps(bad)
@@ -754,6 +780,91 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 out["map_layers"] = layers
         return json.dumps(out)
 
+    def segment_region(bbox: Optional[List[float]] = None, lon: Optional[float] = None,
+                       lat: Optional[float] = None, file_id: Optional[str] = None,
+                       k: int = 6, model: str = "gse", start: str = "2022-06",
+                       end: str = "2022-09", buffer_m: float = _DEFAULT_BUFFER_M,
+                       name: Optional[str] = None) -> str:
+        """Segment a region into `k` look-alike zones from its embedding, ON THE MAP.
+
+        Unsupervised land-cover-style segmentation: the embedding grid is clustered, so
+        ground that looks alike from space gets the same colour. Returns the map layer plus
+        a legend giving each cluster's share of the area. The clusters are discovered, not
+        named — cluster 3 is not "forest" until someone looks.
+        """
+        box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m)
+        if isinstance(box, dict):
+            return json.dumps({"ok": False, **box})
+        if not 2 <= int(k) <= 10:
+            return json.dumps({"ok": False, "error": f"k must be between 2 and 10; got {k}"})
+
+        res = _svc("/api/segment", {"geometry": _geometry(box), "start": start, "end": end,
+                                    "model": model, "k": int(k), "buffer_m": int(buffer_m)})
+        if res.get("error"):
+            return json.dumps({"ok": False, **res})
+        rec = _save_png(str(res.get("image") or ""), f"{_slug(name or 'segments')}_{model}_k{k}")
+        if not rec:
+            return json.dumps({"ok": False, "error": "the service returned no segmentation image"})
+        legend = [{"cluster": e.get("cluster"), "rgb": e.get("rgb"),
+                   "share_pct": round(float(e.get("frac") or 0) * 100, 1)}
+                  for e in (res.get("legend") or [])]
+        return json.dumps({
+            "ok": True, "region_bbox": box, "model": model, "k": int(k),
+            "grid": res.get("grid_hw"), "legend": legend, "on_map": True,
+            "image_file_id": rec["file_id"], "download_url": rec.get("download_url"),
+            "map_layer": _raster_layer(
+                rec, box, _layer_label(f"{model} segments (k={k})", _region_tag(name, box)),
+                _layer_id("segments", _region_tag(None, box), bbox=_round_bbox(box),
+                          model=model, k=int(k), start=start, end=end)),
+            "note": "Clusters are unlabelled: they group similar-looking ground, and the "
+                    "same number means nothing across separate runs.",
+        })
+
+    def embedding_change(bbox: Optional[List[float]] = None, lon: Optional[float] = None,
+                         lat: Optional[float] = None, file_id: Optional[str] = None,
+                         years: Optional[List[int]] = None, model: str = "gse",
+                         buffer_m: float = _DEFAULT_BUFFER_M, name: Optional[str] = None) -> str:
+        """Track how much a region CHANGED across years, from its embeddings.
+
+        Embeds the region once per year and reports each year's distance from the baseline
+        (the earliest year). A spike marks the year the place changed — new construction,
+        clearing, flooding. Returns the per-year table as a CSV file plus the numbers.
+        """
+        box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m)
+        if isinstance(box, dict):
+            return json.dumps({"ok": False, **box})
+        yrs = sorted({int(y) for y in (years or [])})
+        if len(yrs) < 2:
+            return json.dumps({"ok": False, "error": "give at least two years",
+                               "hint": "e.g. years=[2018, 2020, 2022, 2024]"})
+
+        res = _svc("/api/change", {"geometry": _geometry(box), "years": yrs, "model": model,
+                                   "buffer_m": int(buffer_m), "start": "2022-06", "end": "2022-09"})
+        if res.get("error"):
+            return json.dumps({"ok": False, **res})
+        used = [int(y) for y in (res.get("years") or [])]
+        dist = [float(d) for d in (res.get("distances") or [])]
+        rows = list(zip(used, dist, strict=False))
+
+        from agent_runtime.file_store import create_output_file_from_path
+
+        out = Path(tempfile.mkdtemp(prefix="rsembed_")) / f"{_slug(name or 'change')}_{model}.csv"
+        out.write_text("year,distance_from_baseline\n"
+                       + "".join(f"{y},{d:.6f}\n" for y, d in rows), encoding="utf-8")
+        rec = create_output_file_from_path(out, filename=out.name)
+        peak = max(rows, key=lambda t: t[1]) if rows else None
+        return json.dumps({
+            "ok": True, "region_bbox": box, "model": model,
+            "baseline_year": res.get("baseline"), "years": used,
+            "distances": [round(d, 4) for d in dist],
+            "largest_change_year": peak[0] if peak else None,
+            "largest_change_distance": round(peak[1], 4) if peak else None,
+            "csv_file_id": rec["file_id"], "download_url": rec.get("download_url"),
+            "errors": res.get("errors") or [],
+            "note": "Distance is 1 - cosine against the baseline year: 0 means indistinguishable. "
+                    "It says THAT the place changed, not what changed.",
+        })
+
     def compare_regions(bbox_a: List[float], bbox_b: List[float], model: str = "gse",
                         start: str = "2022-06", end: str = "2022-09") -> str:
         """Score how alike TWO regions look from space, using their embeddings.
@@ -785,6 +896,29 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         """List the pretrained downstream models that turn an embedding into a prediction."""
         res = _svc("/api/heads", method="GET")
         return json.dumps(res if res.get("error") else {"ok": True, **res})
+
+    def predict_for_region(bbox: Optional[List[float]] = None, lon: Optional[float] = None,
+                           lat: Optional[float] = None, file_id: Optional[str] = None,
+                           models: Optional[Union[str, List[str]]] = None, start: str = "2022-06",
+                           end: str = "2022-09", buffer_m: float = _DEFAULT_BUFFER_M) -> str:
+        """Run a pretrained downstream head on a region's embedding to PREDICT a value.
+
+        This is the "use the embedding" step: the region is embedded, then an already-trained
+        head turns that vector into an estimate (e.g. crop presence). Call
+        list_prediction_heads first to see what has been trained and how well it scored.
+        """
+        box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m)
+        if isinstance(box, dict):
+            return json.dumps({"ok": False, **box})
+        res = _svc("/api/predict", {"geometry": _geometry(box), "start": start, "end": end,
+                                    "models": _as_list(models) or [],
+                                    "buffer_m": int(buffer_m)})
+        if res.get("error"):
+            return json.dumps({"ok": False, **res})
+        return json.dumps({"ok": True, "region_bbox": box, **res,
+                           "note": "Each prediction carries the head's own validation score — "
+                                   "quote it, because a confident number from a weak head is "
+                                   "still a weak number."})
 
     def list_embedding_packages() -> str:
         """List the embedding packages already SAVED, newest first, with region and months.
@@ -846,7 +980,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                     "colours comparable. Neither re-embeds.",
         })
 
-    def predict_from_package(file_id: str, models: Optional[List[str]] = None) -> str:
+    def predict_from_package(file_id: str,
+                             models: Optional[Union[str, List[str]]] = None) -> str:
         """Run the pretrained heads on an embedding you ALREADY have — no re-embedding.
 
         `file_id` takes EITHER the `embedding_package.file_id` from an embed_region result — from
@@ -945,7 +1080,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         head_dim = {str(h.get("model")): h.get("dim") for h in (heads.get("models") or [])}
         head_score = {str(h.get("model")): h for h in (heads.get("models") or [])}
 
-        wanted = {str(m).strip().lower() for m in (models or []) if str(m).strip()}
+        wanted = {m.lower() for m in (_as_list(models) or [])}
         if wanted:
             missing = sorted(wanted - {m.lower() for m in vectors})
             vectors = {m: v for m, v in vectors.items() if m.lower() in wanted}
@@ -1040,8 +1175,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                        "being asked about another year or another place.")
         return json.dumps(out)
 
-    def align_embedding_colors(file_ids: List[str], model: Optional[str] = None,
-                               names: Optional[List[str]] = None) -> str:
+    def align_embedding_colors(file_ids: Union[str, List[str]], model: Optional[str] = None,
+                               names: Optional[Union[str, List[str]]] = None) -> str:
         """Re-colour several already-embedded regions on ONE shared PCA basis, so the colours
         mean the same thing in every layer.
 
@@ -1068,7 +1203,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
         from agent_runtime.file_store import create_output_file_from_path, resolve_file_id
 
-        ids = [str(f).strip() for f in (file_ids or []) if str(f).strip()]
+        ids = _as_list(file_ids) or []
+        labels = _as_list(names) or []
         if len(ids) < 2:
             return json.dumps({
                 "ok": False,
@@ -1178,8 +1314,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                                           "be placed on the map"})
                 continue
             tag = _region_tag(None, bbox)
-            if names and idx < len(names) and str(names[idx]).strip():
-                tag = str(names[idx]).strip()
+            if labels and idx < len(labels) and str(labels[idx]).strip():
+                tag = str(labels[idx]).strip()
             seen_before = used_tags.get(tag, 0)
             used_tags[tag] = seen_before + 1
             if seen_before:
@@ -1257,10 +1393,13 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
     return [
         StructuredTool.from_function(func=list_embedding_models, name="list_embedding_models", metadata=meta),
         StructuredTool.from_function(func=embed_region, name="embed_region", metadata=meta),
+        StructuredTool.from_function(func=segment_region, name="segment_region", metadata=meta),
+        StructuredTool.from_function(func=embedding_change, name="embedding_change", metadata=meta),
         StructuredTool.from_function(func=compare_regions, name="compare_regions", metadata=meta),
         StructuredTool.from_function(func=align_embedding_colors, name="align_embedding_colors", metadata=meta),
         StructuredTool.from_function(func=list_prediction_heads, name="list_prediction_heads", metadata=meta),
         StructuredTool.from_function(func=list_embedding_packages, name="list_embedding_packages", metadata=meta),
+        StructuredTool.from_function(func=predict_for_region, name="predict_for_region", metadata=meta),
         StructuredTool.from_function(func=predict_from_package, name="predict_from_package", metadata=meta),
     ]
 
@@ -1578,8 +1717,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
     def embed_zones(file_id: str, zone_id_field: Optional[str] = None, model: str = "gse",
                     year: int = 2022, clusters: int = 5, tile_px: int = 200,
                     max_tiles: Optional[int] = None, name: Optional[str] = None,
-                    zone_ids: Optional[List[str]] = None,
-                    sibling_file_ids: Optional[List[str]] = None,
+                    zone_ids: Optional[Union[str, List[str]]] = None,
+                    sibling_file_ids: Optional[Union[str, List[str]]] = None,
                     start: Optional[str] = None, end: Optional[str] = None) -> str:
         """Embed one or many POLYGONS — the pixels INSIDE each shape — and map the result.
 
@@ -1633,6 +1772,10 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         there, the per-zone SUM is recoverable exactly, so zones roll up to a coarser
         partition without error.
         """
+        # One name or several, however they were written — a bare string here would iterate
+        # characters into the zone filter and match nothing.
+        zone_ids = _as_list(zone_ids)
+        sibling_file_ids = _as_list(sibling_file_ids)
         # Every argument that determines the result. A repeat with ANY of them changed is a
         # different question and runs: same polygon, different year is the Change workflow.
         memo_key = _zone_memo_key(

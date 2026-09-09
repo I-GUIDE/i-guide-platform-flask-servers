@@ -337,17 +337,25 @@ def test_both_build_paths_apply_the_filter():
     assert "_is_unbound_mcp_tool(func.__name__)" in factory
 
 
-def test_the_canned_rs_operations_stay_removed():
-    """Segmentation, change and prediction-by-region are COMPOSED from embed_region's package
-    now, not one-shot tools. Re-adding one quietly would put the agent back to four fixed
-    operations, which is the thing this replaced — so the absence is asserted, not assumed."""
+def test_both_routes_to_the_rs_operations_exist():
+    """The one-shot tools AND the package they can be composed from.
+
+    #21 removed segment_region, embedding_change and predict_for_region on the argument that the
+    embedding is the primitive. The argument is good and the composition works — verified live —
+    but it costs resolution: the exported grid is decimated to a cell budget, stride 2 at the
+    default footprint, where segment_region clustered the native grid server-side. So both are
+    kept: the tool for the common case, the package for what the tool cannot express.
+
+    Change and prediction never needed the removal to compose. Both were already multi-step
+    before it, driven by how the question is phrased rather than by the router prompt — the
+    pre-#21 router described one-shot tools and the agent composed anyway."""
     from agent_runtime.rs_embed_tools import make_rs_embed_tools
 
     names = {str(getattr(t, "name", "")) for t in make_rs_embed_tools()}
-    for gone in ("segment_region", "embedding_change", "predict_for_region"):
-        assert gone not in names, f"{gone} came back; compose it from embed_region instead"
-    # ...and the primitives that pay for them are present.
-    assert {"embed_region", "predict_from_package"} <= names
+    assert {"segment_region", "embedding_change", "predict_for_region"} <= names, (
+        "the one-shot route is the higher-resolution one and must stay")
+    assert {"embed_region", "predict_from_package", "list_embedding_packages"} <= names, (
+        "the package route must stay too — it is what expresses the uncommon cases")
 
 
 def test_embed_region_says_how_to_compose_from_its_package():

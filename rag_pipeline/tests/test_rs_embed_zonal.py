@@ -1177,3 +1177,53 @@ def test_a_toolmessage_is_unwrapped_before_it_is_read():
     assert _outcome(ToolMessage('{"documents": [1, 2, 3]}')) == "3 documents"
     assert _outcome(ToolMessage('{"ok": false, "error": "boom"}')) == "failed — boom"
     assert _outcome(b'{"count": 8}') == "8 results"
+
+
+# --- one name or several, however the model wrote it ---------------------------
+def test_a_bare_string_is_one_name_not_three_characters():
+    """Observed live: `ValidationError: models Input should be a valid list
+
+    [input_value='gse', input_type=str]` — pydantic rejected the call before the function ran,
+    and the model retried. Worse than the rejection would have been accepting it: a bare string
+    iterated as characters asks the service for models g, s and e.
+    """
+    from agent_runtime.rs_embed_tools import _as_list
+
+    assert _as_list("gse") == ["gse"]
+    assert _as_list(["gse"]) == ["gse"]
+
+
+def test_comma_separated_is_accepted_too():
+    """What a model reaches for once it knows a list is wanted. Splitting here is cheaper than
+
+    another rejection."""
+    from agent_runtime.rs_embed_tools import _as_list
+
+    assert _as_list("gse,satmae") == ["gse", "satmae"]
+    assert _as_list("gse, satmae , dofa") == ["gse", "satmae", "dofa"]
+
+
+def test_absent_stays_absent():
+    """None means "the default", and turning it into [] would mean "explicitly none"."""
+    from agent_runtime.rs_embed_tools import _as_list
+
+    assert _as_list(None) is None
+    assert _as_list("") == []
+
+
+def test_the_list_parameters_accept_a_scalar_in_their_schema():
+    """The coercion is useless if pydantic rejects the call first, so the ANNOTATIONS have to
+
+    admit a string — that is where the ValidationError came from.
+    """
+    import inspect
+
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    by_name = {t.name: t for t in make_rs_embed_tools()}
+    for tool, param in (("embed_region", "models"), ("predict_for_region", "models"),
+                        ("predict_from_package", "models"),
+                        ("align_embedding_colors", "file_ids"),
+                        ("align_embedding_colors", "names")):
+        ann = str(inspect.signature(by_name[tool].func).parameters[param].annotation)
+        assert "str" in ann and "List" in ann, f"{tool}.{param} still refuses a bare string: {ann}"

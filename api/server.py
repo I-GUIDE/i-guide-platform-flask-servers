@@ -222,7 +222,14 @@ def _category_for_agent_role(role: object) -> str:
     return "analysis"
 
 
-def _short_text(value: object, limit: int = 900) -> str:
+# 900 chars cut a python traceback off before its last frame — the one naming the error — so the
+# expandable trace row had nothing useful to expand into. 4000 is enough for a stack trace and a
+# tool's argument dict while still being a bound: the trace is a stream, not a transport for
+# results, and a 15 MB GeoJSON must never travel down it.
+_TRACE_TEXT_LIMIT = int(os.getenv("AGENT_TRACE_SSE_TEXT_LIMIT") or 4000)
+
+
+def _short_text(value: object, limit: int = _TRACE_TEXT_LIMIT) -> str:
     text = value if isinstance(value, str) else str(value or "")
     text = " ".join(text.split())
     return text if len(text) <= limit else f"{text[:limit]}..."
