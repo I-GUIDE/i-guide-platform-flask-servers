@@ -1002,3 +1002,50 @@ def test_the_scope_resolves_for_a_real_trace_state():
         assert T._zone_memo_scope() == scope, "the same turn must resolve to the same scope"
     finally:
         _TRACE_STATE.reset(token)
+
+
+# --- a month and a date mean the same thing to both tools ----------------------
+def test_a_month_is_widened_to_the_whole_month():
+    """embed_region documents its window as "YYYY-MM"; the zones service demands full ISO.
+
+    A model that had read embed_region passed "2022-06" here, got `SpecError: TemporalSpec.range
+    expects ISO dates 'YYYY-MM-DD'`, retried with "2022-06-01" and succeeded — which is why one
+    request produced two embed_zones calls and why the first looked like a duplicate sweep.
+    """
+    from agent_runtime.rs_embed_tools import _iso_date
+
+    assert _iso_date("2022-06") == "2022-06-01"
+    assert _iso_date("2022-09", month_end=True) == "2022-09-30"
+
+
+def test_the_end_of_a_month_is_its_last_day_not_its_first():
+    """Otherwise "2022-06" to "2022-09" would stop on 1 September and quietly drop a month."""
+    from agent_runtime.rs_embed_tools import _iso_date
+
+    assert _iso_date("2022-02", month_end=True) == "2022-02-28"
+    assert _iso_date("2024-02", month_end=True) == "2024-02-29"      # leap year
+
+
+def test_a_full_date_is_left_alone():
+    from agent_runtime.rs_embed_tools import _iso_date
+
+    assert _iso_date("2022-06-15") == "2022-06-15"
+    assert _iso_date("2022-06-15", month_end=True) == "2022-06-15"
+
+
+def test_no_window_stays_no_window():
+    """None means "the whole of `year`" — widening it to a date would silently narrow the run."""
+    from agent_runtime.rs_embed_tools import _iso_date
+
+    assert _iso_date(None) is None
+    assert _iso_date("") is None
+
+
+def test_the_memo_sees_a_month_and_its_date_as_one_call(in_a_turn):
+    """The retry that produced the second record passes the SAME window in the other spelling."""
+    T = in_a_turn
+    as_month = T._zone_memo_key(**_memo_call(start="2022-06", end="2022-09"))
+    T._zone_memo_put(as_month, '{"ok": true}')
+    # embed_zones normalises before keying, so both spellings resolve to one entry.
+    assert T._zone_memo_key(**_memo_call(start="2022-06-01", end="2022-09-30")) != as_month, (
+        "the helper normalises at the call site, not inside _zone_memo_key")

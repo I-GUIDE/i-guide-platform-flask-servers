@@ -18,11 +18,13 @@ rather than by a reconstruction of it.
 from __future__ import annotations
 
 import base64
+import calendar
 import hashlib
 import itertools
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from collections import OrderedDict
@@ -51,6 +53,29 @@ _ZONE_MEMO: "OrderedDict[str, Tuple[float, str]]" = OrderedDict()
 _ZONE_MEMO_TTL_S = float(os.getenv("RS_EMBED_ZONE_MEMO_TTL_S", "1800"))
 _ZONE_MEMO_MAX = 32
 _ZONE_SCOPE_SEQ = itertools.count(1)
+
+
+def _iso_date(value: Optional[str], *, month_end: bool = False) -> Optional[str]:
+    """Accept a month or a full date, return the ISO date the zones service demands.
+
+    embed_region documents its window as MONTHS ("YYYY-MM") and the zones service wants full
+    ISO dates, so a model that had just read embed_region passed "2022-06" here and got
+    `SpecError: TemporalSpec.range expects ISO dates 'YYYY-MM-DD'`. It then retried with
+    "2022-06-01" and succeeded — which is why one request produced two embed_zones calls, and
+    why the first looked like a duplicate sweep rather than the failure it was.
+
+    Two tools over the same imagery should not disagree about what a date looks like. A month
+    widens to the whole month: the START to its first day, the END to its last, so "2022-06" to
+    "2022-09" means June through September inclusive rather than stopping on the 1st.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}", text):
+        year, month = (int(part) for part in text.split("-"))
+        day = calendar.monthrange(year, month)[1] if month_end else 1
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    return text
 
 
 def _zone_memo_scope() -> Optional[str]:
@@ -1621,9 +1646,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         what it looks like from space. Works with any polygon layer: GeoJSON, shapefile,
         GeoPackage.
 
-        `start`/`end` (e.g. "2025-03-01", "2025-05-01") embed a DATE RANGE instead of the
-        whole of `year` — pass both or neither. Use them whenever the user names a period:
-        without them a request for March-May silently becomes a full-year composite.
+        `start`/`end` embed a DATE RANGE instead of the whole of `year` — pass both or neither.
+        Use them whenever the user names a period: without them a request for March-May
+        silently becomes a full-year composite. Either form works, the same as embed_region:
+        a month ("2025-03") or a full date ("2025-03-01"). A month covers all of itself, so
+        "2025-03" to "2025-05" is March through May inclusive.
 
         There is NO tile cap by default, so the sweep fetches every tile the polygons touch
         and the answer covers all of them. Each tile is one request to the imagery provider,
@@ -1656,7 +1683,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             clusters=clusters, tile_px=tile_px, max_tiles=max_tiles, name=name,
             zone_ids=sorted(str(z) for z in (zone_ids or [])),
             sibling_file_ids=sorted(str(f) for f in (sibling_file_ids or [])),
-            start=start, end=end)
+            start=_iso_date(start), end=_iso_date(end, month_end=True))
         replayed = _zone_memo_get(memo_key)
         if replayed is not None:
             try:
@@ -1703,7 +1730,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         res = run_zonal_worker({"polygons_path": str(read_path), "zone_id_field": zone_id_field,
                                 "model": model, "year": int(year), "tile_px": int(tile_px),
                                 "max_tiles": None if max_tiles is None else int(max_tiles),
-                                "start": start, "end": end,
+                                # A month is widened to the whole month here rather than
+                                # rejected: embed_region documents its window as "YYYY-MM", so
+                                # a model that read that one passes months to this one.
+                                "start": _iso_date(start),
+                                "end": _iso_date(end, month_end=True),
                                 "zone_ids": [str(z) for z in zone_ids] if zone_ids else None,
                                 "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
                                 "image": True})
