@@ -380,6 +380,45 @@ def _model_error(models: List[str], available: List[Dict[str, Any]]) -> Optional
 
 
 # --- tools ---------------------------------------------------------------------
+def _safe_path(record: Dict[str, Any]) -> Optional[Any]:
+    """The stored path for a file record, or None when it cannot be resolved."""
+    from agent_runtime.file_store import resolve_file_id
+
+    try:
+        return resolve_file_id(str(record.get("file_id")))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _where_when(path: Optional[Any]) -> Optional[tuple]:
+    """A package's (region, months) as a comparable key, or None when it will not read.
+
+    Used to tell apart the two kinds of duplicate name: several exports of the SAME region and
+    period, which are interchangeable, and several different PLACES that happen to share the
+    default export filename, which are not.
+    """
+    if path is None:
+        return None
+    from agent_runtime import rs_embed_head_domain as domain
+
+    where = domain.package_region(domain.read_manifest(path))
+    if not where:
+        return None
+    box = where.get("region_bbox")
+    return (tuple(round(float(v), 4) for v in box) if box else None, where.get("months"))
+
+
+def _candidate(record: Dict[str, Any]) -> Dict[str, Any]:
+    """One package as a choice the model can actually make: its id, name, region and months."""
+    from agent_runtime import rs_embed_head_domain as domain
+
+    out: Dict[str, Any] = {"file_id": record.get("file_id"), "filename": record.get("filename")}
+    path = _safe_path(record)
+    if path is not None:
+        out.update(domain.package_region(domain.read_manifest(path)))
+    return {k: v for k, v in out.items() if v not in (None, "", [], {})}
+
+
 def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> List[Any]:
     """Build the remote-sensing embedding StructuredTools."""
     from langchain_core.tools import StructuredTool
@@ -663,14 +702,20 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                                    "still a weak number."})
 
     def list_embedding_packages() -> str:
-        """List the embedding packages ALREADY SAVED in this session, newest first.
+        """List the embedding packages already SAVED, newest first, with region and months.
 
         Every embed_region call saves the real vectors as an .npz. This says which ones exist,
         for which region and months, and which models each holds — so an embedding made in an
         earlier turn can be reused instead of paying for the region again. Use it whenever the
-        user refers to an embedding, a layer or a region that was worked on earlier and the
-        file_id is not to hand; then pass the file_id to predict_from_package or
-        align_embedding_colors.
+        user refers to an embedding, a layer or a region worked on earlier and the file_id is not
+        to hand; then pass that file_id to predict_from_package or align_embedding_colors.
+
+        SCOPE: the file store records no conversation, so this lists what the DEPLOYMENT has
+        saved, not only this conversation. Packages from earlier or other conversations appear
+        too. Match on the region and months rather than on the filename — the default export
+        name is reused for every unnamed region, so one name covers many different places — and
+        do not describe a package as "yours" or "the one from earlier" on the strength of its
+        name alone.
 
         `has_head` says whether a pretrained head exists for that model, so a package that
         cannot be predicted from is visible as such before anything is attempted.
@@ -760,6 +805,23 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 "hint": "Accepts a file_id, a layer's embedding.file_id, or the package's "
                         "filename. Call list_embedding_packages to see the saved packages with "
                         "their regions and months, then pass one of those file_ids."})
+
+        if alternatives:
+            chosen_where = _where_when(path)
+            differing = [a for a in alternatives
+                         if _where_when(_safe_path(a)) not in (None, chosen_where)]
+            if differing:
+                return json.dumps({
+                    "ok": False,
+                    "error": f"{len(alternatives) + 1} saved packages match {fid!r} and they "
+                             "cover different regions or months, so which one to score is not "
+                             "decided by the name",
+                    "candidates": [_candidate(rec_a) for rec_a
+                                   in [record, *alternatives][:8]],
+                    "hint": "Pass the file_id of the one you mean. A layer on the map carries "
+                            "its own in `embedding.file_id`; list_embedding_packages shows each "
+                            "package's region and months. The default export name is reused for "
+                            "every unnamed region, so a name often matches many places."})
 
         if not str(path).lower().endswith(".npz"):
             # A CSV is almost always embed_zones output, and the steer for it is a different
@@ -851,12 +913,16 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                                "package_file_id": str(record.get("file_id") or fid),
                                "package_filename": record.get("filename"),
                                "scored_models": usable}
-        # A name can legitimately match several packages. Naming the losers is what stops the
-        # answer from presenting a guess about WHICH region was scored as a settled fact.
+        # A name can legitimately match several packages, and in practice it usually does: the
+        # default export name is reused for every unnamed region, so one name can cover dozens
+        # of different places. Duplicates of the SAME region and period are interchangeable and
+        # picking the newest is harmless; candidates that differ in region or months are a
+        # different question, and answering it by mtime would report a coin flip as a fact.
+        # Those are refused before the upload, in _candidates_disagree above.
         if alternatives:
-            out["also_matched"] = [{"file_id": a.get("file_id"), "filename": a.get("filename")}
-                                   for a in alternatives[:5]]
-            out["resolved_by"] = f"newest package whose name matches {fid!r}"
+            out["also_matched"] = [_candidate(a) for a in alternatives[:5]]
+            out["resolved_by"] = (f"{len(alternatives) + 1} packages match {fid!r} and all cover "
+                                  "the same region and months; scored the newest")
         # Region and months come back onto the result because this tool takes no bbox argument:
         # without them neither the answer nor the action ledger records WHAT was predicted.
         out.update(domain.package_region(manifest))

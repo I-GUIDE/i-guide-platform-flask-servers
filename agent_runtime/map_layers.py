@@ -224,6 +224,16 @@ def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional
                     return None
                 out["bounds"] = [float(v) for v in bounds]
                 out["opacity"] = float(ml.get("opacity") or 0.85)
+                # The vectors the picture was made FROM. An embedding raster is a 3-colour
+                # projection and answers nothing alone, so the pointer to its package is what
+                # makes the layer a handle for a later question rather than just an image. Named
+                # here for the same reason `outline` and `sampled` had to be: this dict is a
+                # FIXED SHAPE, and a field the tool sets and the client reads still arrives as
+                # nothing unless it is copied across.
+                embedding = ml.get("embedding")
+                if isinstance(embedding, dict) and embedding.get("file_id"):
+                    out["embedding"] = {k: v for k, v in embedding.items()
+                                        if v not in (None, "", [], {})}
                 return out
 
             # A CATEGORICAL layer carries its own palette: the tool that assigned the classes

@@ -430,18 +430,53 @@ def test_the_tool_accepts_a_filename(tool, store, tmp_path, monkeypatch):
     assert calls["uploaded_keys"] == ["meta", "pooled__gse"]
 
 
-def test_the_tool_names_the_packages_it_did_not_use(tool, store, tmp_path, monkeypatch):
+def test_duplicates_of_one_region_resolve_to_the_newest(tool, store, tmp_path):
+    """Several exports of the same region and period are interchangeable — pick one, say so."""
     import os
     import time
 
     fn, _calls = tool
-    first = _save(store, tmp_path, "champaign_june_vectors.npz")
-    _save(store, tmp_path, "champaign_july_vectors.npz")
+    first = _save(store, tmp_path, "champaign_a_vectors.npz")
+    _save(store, tmp_path, "champaign_b_vectors.npz")
     os.utime(store.resolve_file_id(first["file_id"]), (time.time() - 500, time.time() - 500))
     out = json.loads(fn("champaign"))
-    assert out["package_filename"] == "champaign_july_vectors.npz"
-    assert [a["filename"] for a in out["also_matched"]] == ["champaign_june_vectors.npz"]
-    assert "champaign" in out["resolved_by"]
+    assert out["ok"] is True
+    assert out["package_filename"] == "champaign_b_vectors.npz"
+    assert [a["filename"] for a in out["also_matched"]] == ["champaign_a_vectors.npz"]
+    assert "same region and months" in out["resolved_by"]
+
+
+def test_a_name_covering_different_regions_is_refused(tool, store, tmp_path):
+    """The real case: the default export name is reused, so one name spans many places.
+
+    In the live store 73 packages carry 22 distinct filenames and `embedding_vectors.npz` alone
+    is used 32 times. Resolving that by mtime would answer a question about the wrong region
+    with a perfectly plausible probability, so it has to be refused with the candidates.
+    """
+    fn, calls = tool
+    _save(store, tmp_path, "embedding_vectors.npz")
+    _save(store, tmp_path, "embedding_vectors.npz",
+          manifest=_manifest(geometry=dict(BAVARIA_BOX)))
+    out = json.loads(fn("embedding_vectors.npz"))
+    assert out["ok"] is False
+    assert "different regions or months" in out["error"]
+    assert len(out["candidates"]) == 2
+    assert {c["filename"] for c in out["candidates"]} == {"embedding_vectors.npz"}
+    # Region is what tells them apart, so it has to be IN the choice.
+    assert all("region_bbox" in c for c in out["candidates"])
+    assert calls["uploads"] == []
+
+
+def test_a_name_covering_different_months_is_refused(tool, store, tmp_path):
+    fn, calls = tool
+    _save(store, tmp_path, "region_vectors.npz")
+    _save(store, tmp_path, "region_vectors.npz",
+          manifest=_manifest(start="2018-06", end="2018-09"))
+    out = json.loads(fn("region_vectors.npz"))
+    assert out["ok"] is False
+    assert sorted(c.get("months") for c in out["candidates"]) == ["2018-06..2018-09",
+                                                                  "2022-06..2022-09"]
+    assert calls["uploads"] == []
 
 
 def test_models_narrows_the_run_to_one_layer(tool, store, tmp_path, monkeypatch):
@@ -489,3 +524,49 @@ def test_listing_says_so_when_nothing_has_been_embedded(store, monkeypatch):
     out = json.loads(listing.func())
     assert out["ok"] is True and out["packages"] == []
     assert "embed_region saves one" in out["note"]
+
+
+# --- the pointer has to survive TWO field-by-field rebuilds ---------------------
+def _built(descriptor):
+    from agent_runtime.map_layers import build_map_layer
+
+    return build_map_layer("embed_region", {"map_layer": descriptor})
+
+
+def test_build_map_layer_keeps_the_embedding_pointer():
+    """The regression this file exists for second time round.
+
+    build_map_layer assembles a FIXED-SHAPE dict, so a field the tool sets and the client reads
+    arrives as nothing unless it is named there — the same trap `outline` and `sampled` already
+    fell into. Setting the pointer on the tool's descriptor is therefore not enough on its own,
+    and nothing downstream can tell the difference between "no vectors" and "stripped in transit".
+    """
+    out = _built({"url": "/f/1/download", "label": "gse embedding", "render": "raster",
+                  "bounds": [-88.3, 40.0, -88.2, 40.1], "id": "embed-pca-abc",
+                  "embedding": {"file_id": "file_abc", "filename": "r_vectors.npz",
+                                "model": "gse", "months": "2022-06..2022-09"}})
+    assert out is not None
+    assert out["embedding"] == {"file_id": "file_abc", "filename": "r_vectors.npz",
+                                "model": "gse", "months": "2022-06..2022-09"}
+
+
+def test_build_map_layer_omits_the_pointer_when_there_is_none():
+    out = _built({"url": "/f/1/download", "label": "a mask", "render": "raster",
+                  "bounds": [-88.3, 40.0, -88.2, 40.1], "id": "embed-seg-abc"})
+    assert out is not None and "embedding" not in out
+
+
+def test_build_map_layer_ignores_a_pointer_with_no_file_id():
+    """Half a pointer is worse than none: it would read as data that cannot be fetched."""
+    out = _built({"url": "/f/1/download", "label": "gse embedding", "render": "raster",
+                  "bounds": [-88.3, 40.0, -88.2, 40.1], "id": "embed-pca-abc",
+                  "embedding": {"model": "gse"}})
+    assert out is not None and "embedding" not in out
+
+
+def test_build_map_layer_drops_empty_pointer_fields():
+    out = _built({"url": "/f/1/download", "label": "gse embedding", "render": "raster",
+                  "bounds": [-88.3, 40.0, -88.2, 40.1], "id": "embed-pca-abc",
+                  "embedding": {"file_id": "file_abc", "filename": None,
+                                "models_in_package": []}})
+    assert out["embedding"] == {"file_id": "file_abc"}

@@ -319,6 +319,10 @@ export async function streamChat(
             bounds: Array.isArray(layer.bounds) && layer.bounds.length === 4
               ? (layer.bounds.map(Number) as [number, number, number, number]) : undefined,
             opacity: typeof layer.opacity === 'number' ? layer.opacity : undefined,
+            // Second of two field-by-field rebuilds between the tool and the layer list (the
+            // other is the server's build_map_layer). A field missing from EITHER is gone, so
+            // the pointer to the layer's vectors has to be named in both.
+            embedding: layer.embedding && layer.embedding.file_id ? layer.embedding : undefined,
           });
         } else if (layer.geojson && Array.isArray(layer.geojson.features)) {
           h.onMapLayer?.({
