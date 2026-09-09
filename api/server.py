@@ -41,8 +41,28 @@ def _coalesce(*values):
     return None
 
 
+def _demo_mode() -> bool:
+    """DEMO_MODE opens the deployment to anyone who has the link.
+
+    It turns OFF the API-key check on every agent endpoint and tells the UI to hide its
+    connection settings, so a page can be handed to an audience without also handing them a
+    credential to paste. That is the whole point of it, and it is also exactly why it defaults
+    to off: with it on, anyone who finds the URL can run turns that spend this deployment's
+    Earth Engine quota and LLM budget. Set it only on a deployment you are willing to have used.
+    """
+    return str(os.getenv("DEMO_MODE") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _get_agent_chat_api_key() -> str:
     return str(os.getenv("AGENT_CHAT_API_KEY") or "").strip()
+
+
+if _demo_mode():
+    # At import, so it appears once in the container log rather than per request. An open
+    # deployment should never be a thing someone discovers from its behaviour.
+    logger.warning(
+        "DEMO_MODE is ON: the API key is NOT enforced and the UI hides its connection "
+        "settings. Every agent endpoint is open to anyone who can reach this server.")
 
 
 def _extract_presented_api_key() -> str:
@@ -56,6 +76,11 @@ def _extract_presented_api_key() -> str:
 
 
 def _require_agent_chat_api_key() -> None:
+    # Checked BEFORE the key is read, so a deployment can keep AGENT_CHAT_API_KEY configured and
+    # simply stop enforcing it for the duration of a demo — rather than having to unset the
+    # secret and remember to put it back.
+    if _demo_mode():
+        return
     expected = _get_agent_chat_api_key()
     if not expected:
         return  # auth disabled when key is not configured
@@ -576,6 +601,22 @@ def _list_code_peers():
                        else ("no credential" if not opencode_ready else "image not built")},
         ],
     }
+
+
+@app.route('/agent/ui-config', methods=['GET'])
+def agent_ui_config():
+    """What the browser needs to know before it can render its own chrome.
+
+    Deliberately UNAUTHENTICATED and deliberately tiny: a client that cannot yet authenticate is
+    exactly the client that needs to ask whether it has to. It answers only whether this
+    deployment is in demo mode and whether a key is required — never the key itself, and nothing
+    else about the configuration.
+    """
+    demo = _demo_mode()
+    return jsonify({
+        "demo_mode": demo,
+        "api_key_required": bool(_get_agent_chat_api_key()) and not demo,
+    })
 
 
 @app.route('/agent/models', methods=['GET'])

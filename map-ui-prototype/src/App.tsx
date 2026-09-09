@@ -13,9 +13,8 @@ import { queryOverpass } from './overpass';
 import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, layerBBox } from './analysis';
 import { bboxToFC } from './mapFit';
 import {
-  streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels,
-  type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine,
-} from './agentClient';
+  streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
+  type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine } from './agentClient';
 import { renderMarkdown } from './markdown';
 import type { AppTab } from './uiVariant';
 import {
@@ -148,6 +147,18 @@ export default function App() {
   }, [mapVisible]);
 
   const asAgentConfig = useCallback((): AgentConfig => ({ ...cfg }), [cfg]);
+  // DEMO_MODE on the server: the API key is not enforced and the connection settings are hidden,
+  // so a link can be handed to an audience without also handing them a credential to paste.
+  // Asked once per endpoint, and only in live mode — the offline demo has no server to ask.
+  // Unreachable or unknown means NOT a demo, which keeps the settings available: a page that
+  // hides the key field on a deployment that turns out to need one cannot be recovered from.
+  const [demoMode, setDemoMode] = useState(false);
+  useEffect(() => {
+    if (mode !== 'live') { setDemoMode(false); return; }
+    let live = true;
+    void fetchUiConfig(asAgentConfig()).then((c) => { if (live) setDemoMode(!!c?.demo_mode); });
+    return () => { live = false; };
+  }, [mode, cfg.endpoint]);
   useEffect(() => {
     if (mode !== 'live') return;
     let live = true;
@@ -626,7 +637,7 @@ export default function App() {
 
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}`}>
-      <TopNav onToggleSettings={() => setShowSettings((s) => !s)}
+      <TopNav demoMode={demoMode} onToggleSettings={() => setShowSettings((s) => !s)}
         onToggleHistory={() => { setShowHistory((v) => !v); void listSessions().then(setSessions); }}
         sessionCount={sessions.length}
         tab={tab}
@@ -728,7 +739,7 @@ export default function App() {
           messages={messages} busy={busy} tab={tab} hasRegion={!!drawnRegion} layers={layers}
           mapVisible={mapVisible} onToggleMap={() => setMapVisible((v) => !v)}
           models={models}
-          mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}
+          mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings && !demoMode} resolveUrl={resolveUrl}
           onSend={runAgent}
         onStop={() => abortRef.current?.abort()}
           onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}

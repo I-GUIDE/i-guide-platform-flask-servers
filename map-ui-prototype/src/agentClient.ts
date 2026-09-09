@@ -57,6 +57,27 @@ export interface ModelCatalogue {
   };
 }
 
+export interface UiConfig {
+  demo_mode: boolean;
+  api_key_required: boolean;
+}
+
+/** Ask the deployment whether it is open, BEFORE trying to authenticate against it.
+ *
+ * Unauthenticated on purpose at both ends: a client that does not have a key is exactly the
+ * client that needs to know whether it needs one. Failure degrades to "not a demo", which keeps
+ * the settings reachable — the safe direction to be wrong in, since the alternative is a page
+ * with no way to enter a credential it turns out to need. */
+export async function fetchUiConfig(cfg: AgentConfig): Promise<UiConfig | null> {
+  try {
+    const r = await fetch(absoluteUrl('/agent/ui-config', cfg));
+    if (!r.ok) return null;
+    return (await r.json()) as UiConfig;
+  } catch {
+    return null;
+  }
+}
+
 /** Ask the agent which models a request may select. */
 export async function fetchModels(cfg: AgentConfig): Promise<ModelCatalogue | null> {
   try {

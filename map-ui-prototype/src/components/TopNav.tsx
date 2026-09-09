@@ -5,6 +5,8 @@ import { TopNavPlatform } from './TopNav.platform';
 import { isPlatformVariant, type AppTab } from '../uiVariant';
 
 export interface TopNavProps {
+  /** Server-side DEMO_MODE: the deployment needs no key, so there is nothing to configure. */
+  demoMode?: boolean;
   onToggleSettings: () => void;
   onToggleHistory: () => void;
   sessionCount: number;
@@ -102,7 +104,13 @@ function TopNavRsEmbed(p: TopNavProps) {
         <button className="navbtn" title="Past conversations" onClick={p.onToggleHistory}>
           History{p.sessionCount ? ` (${p.sessionCount})` : ''}
         </button>
-        <button className="navbtn gear" title="Connection settings" onClick={p.onToggleSettings}>⚙</button>
+        {/* In demo mode there is no key to enter and no endpoint worth changing, and the one
+            control the dialog still offered — the mock/live switch — is not what an audience
+            should find first. Hidden rather than disabled: a greyed gear invites a click that
+            explains nothing. */}
+        {!p.demoMode && (
+          <button className="navbtn gear" title="Connection settings" onClick={p.onToggleSettings}>⚙</button>
+        )}
       </div>
     </header>
   );
