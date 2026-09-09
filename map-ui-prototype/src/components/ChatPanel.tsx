@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { LayerArtifact } from '../contracts';
 import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
@@ -35,6 +35,9 @@ const RS_YEARS = ['2024', '2023', '2022', '2021', '2020', '2019', '2018'];
 // embed_region truncates to _MAX_MODELS_PER_CALL SILENTLY (rs_embed_tools.py:37,386), so a
 // sixth pick would vanish without a word. Stop at the cap in the UI, where it can be explained.
 const RS_MAX_MODELS = 5;
+// How tall the composer may grow before it starts scrolling. Four lines holds every staged
+// operation question, and stops a pasted wall of text from eating the conversation above it.
+const COMPOSER_MAX_ROWS = 4;
 // The second group runs the encoder at request time. Every model in one embed_region call shares
 // a SINGLE 600s budget (rs_embed_tools.py:35), so two of these together can blow it and lose the
 // whole call — including the models that had already finished.
@@ -282,6 +285,11 @@ export function ChatPanel(p: Props) {
     stageRs(rsOp, next, rsYear, rsSeason);
   };
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The composer grows with what is in it, to a ceiling of COMPOSER_MAX_ROWS lines. It was a
+  // fixed 40px: a staged operation question runs to two or three lines, so the question you
+  // were about to ask scrolled out of sight above the caret and could not be read before it was
+  // sent — which is the entire point of staging it instead of firing it.
+  const taRef = useRef<HTMLTextAreaElement>(null);
   // Whether the transcript is FOLLOWING new content. True while the reader is at the bottom,
   // false once they scroll up to read something. A ref, not state: it changes on every scroll
   // event and nothing renders from it, so re-rendering the transcript on each one would be
@@ -346,6 +354,38 @@ export function ChatPanel(p: Props) {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // Runs before paint, so a staged question that needs three lines is never shown at one and
+  // then jumped. Measured from the element's own computed style rather than from hardcoded
+  // pixels, so changing the composer's font or padding cannot silently move the ceiling.
+  useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    const cs = getComputedStyle(el);
+    const line = parseFloat(cs.lineHeight) || 22;
+    const max = line * COMPOSER_MAX_ROWS
+      + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+    const wasScrolledTo = el.scrollTop;
+    // Collapse first. scrollHeight on an element already tall enough reports the ELEMENT, not
+    // the content, so without this the box would only ever grow and never shrink back — most
+    // visibly after sending, when the text is gone but the height would remain.
+    el.style.height = 'auto';
+    const needed = el.scrollHeight;
+    el.style.height = `${Math.min(needed, max)}px`;
+    // Only scroll once the ceiling is actually reached; below it there is nothing to scroll and
+    // a permanent scrollbar steals a few pixels from the text on some platforms.
+    el.style.overflowY = needed > max ? 'auto' : 'hidden';
+    if (needed > max) {
+      // Measuring costs the scroll position: collapsing to `auto` removes the overflow, which
+      // zeroes scrollTop, and past the ceiling that leaves the caret off-screen BELOW. That is
+      // the same "cannot see what you are typing" the fixed height caused, just at the other
+      // end. Typing at the end is the common case and wants the bottom; an edit in the middle
+      // wants the view it already had.
+      const atEnd = el.selectionStart === el.value.length
+        && el.selectionEnd === el.value.length;
+      el.scrollTop = atEnd ? el.scrollHeight : wasScrolledTo;
+    }
+  }, [text]);
 
   const send = (t: string) => {
     const v = t.trim();
@@ -647,7 +687,7 @@ export function ChatPanel(p: Props) {
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.5l-8.5 8.5a5 5 0 01-7-7l9-9a3.5 3.5 0 015 5l-9 9a2 2 0 01-3-3l8-8" /></svg>
             <input type="file" multiple style={{ display: 'none' }} onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length) p.onUpload(fs); (e.target as HTMLInputElement).value = ''; }} />
           </label>
-          <textarea value={text}
+          <textarea ref={taRef} value={text} rows={1}
             placeholder={p.mode === 'live' ? 'Ask me anything…' : 'Offline demo — try “show hospitals here”'}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(text); } }} />

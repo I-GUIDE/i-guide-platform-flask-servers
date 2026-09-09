@@ -280,7 +280,11 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .box { display: flex; align-items: flex-end; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: 26px; box-shadow: var(--shadow); padding: 8px; }
 /* Without min-width:0 the textarea's automatic minimum is its cols-derived width (~180px),
    which put the composer's real floor above the pane's. */
-.box textarea { flex: 1; min-width: 0; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; line-height: 1.5; max-height: 160px; height: 40px; padding: 8px 6px; background: transparent; color: var(--ink); }
+/* Height is set by ChatPanel's grow effect (COMPOSER_MAX_ROWS lines, measured from this
+   element's own computed style). `min-height` keeps a one-line composer level with the circular
+   buttons beside it; `max-height` is a backstop for the case where that effect has not run, not
+   the real ceiling — leave the two consistent if the font or padding here changes. */
+.box textarea { flex: 1; min-width: 0; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; line-height: 1.5; min-height: 40px; max-height: 40vh; padding: 8px 6px; background: transparent; color: var(--ink); }
 .circle { width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--line); background: #fff; color: #5b6168; display: grid; place-items: center; cursor: pointer; flex: 0 0 auto; padding: 0; box-shadow: none; }
 .circle:hover:not(:disabled) { background: var(--soft); }
 .circle.send { background: var(--brand); border-color: var(--brand); color: #fff; }
