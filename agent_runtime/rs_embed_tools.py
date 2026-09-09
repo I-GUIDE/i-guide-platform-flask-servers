@@ -1695,6 +1695,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             attached = _index_attached(default_input_file_ids)
             read_path, tmp = _stage_vector_source(file_id, sibling_file_ids, attached)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("embed_zones failed fast: could not read %s: %s", file_id, exc)
             return json.dumps({"ok": False, "error": f"could not read {file_id}: {exc}"})
 
         png_path = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / artifact_name(
@@ -1707,6 +1708,14 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                 "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
                                 "image": True})
         if not res.get("ok"):
+            # Logged, because the trace does not show tool RESULTS — only calls. A failure and
+            # a success render identically as a single `embed_zones(...)` line, which is how a
+            # fast failure followed by a retry read as a duplicate sweep for two rounds of
+            # diagnosis. Until the trace carries results, the server log is the only place the
+            # reason exists.
+            logger.warning("embed_zones failed: %s",
+                           json.dumps({k: v for k, v in res.items()
+                                       if k in ("error", "detail", "hint")})[:400])
             return json.dumps({"ok": False, **{k: v for k, v in res.items() if k != "zones"}})
 
         zones = res["zones"]
