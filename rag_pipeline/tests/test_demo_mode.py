@@ -115,3 +115,75 @@ def test_ui_config_never_returns_the_key_itself(monkeypatch):
     monkeypatch.setenv("AGENT_CHAT_API_KEY", KEY)
     monkeypatch.setenv("DEMO_MODE", "true")
     assert KEY not in str(_ui_config())
+
+
+# --- files belong to the conversation that made them ---------------------------
+@pytest.fixture()
+def store(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path / "fs"))
+    from agent_runtime import file_store
+
+    return file_store
+
+
+def test_a_file_records_the_conversation_that_wrote_it(store, tmp_path):
+    """The record had seven fields and none of them said who made it, so every session saw
+
+    every file: 48 packages sharing one filename came from many different conversations, and
+    list_embedding_packages could not be scoped to the caller.
+    """
+    token = store.set_session("sess-alpha")
+    try:
+        rec = store.create_output_file("a.txt", "x")
+    finally:
+        store.reset_session(token)
+    assert rec["session"] == "sess-alpha"
+
+
+def test_a_lookup_sees_its_own_conversation(store):
+    a = store.set_session("sess-alpha")
+    store.create_output_file("mine.txt", "x")
+    store.reset_session(a)
+
+    b = store.set_session("sess-beta")
+    store.create_output_file("theirs.txt", "x")
+    try:
+        names = {f["filename"] for f in store.find_files()}
+        assert "theirs.txt" in names
+        assert "mine.txt" not in names, "another conversation's file must not be visible"
+    finally:
+        store.reset_session(b)
+
+
+def test_files_from_before_sessions_existed_stay_visible(store):
+    """1,325 records predate this field. Hiding them all would break every reuse the demo
+
+    depends on, so an unstamped record belongs to everyone.
+    """
+    rec = store.create_output_file("legacy.txt", "x")     # no session bound
+    assert rec.get("session") is None
+    token = store.set_session("sess-alpha")
+    try:
+        assert "legacy.txt" in {f["filename"] for f in store.find_files()}
+    finally:
+        store.reset_session(token)
+
+
+def test_searching_every_conversation_is_possible_but_explicit(store):
+    a = store.set_session("sess-alpha")
+    store.create_output_file("mine.txt", "x")
+    store.reset_session(a)
+    b = store.set_session("sess-beta")
+    try:
+        assert "mine.txt" not in {f["filename"] for f in store.find_files()}
+        assert "mine.txt" in {f["filename"] for f in store.find_files(session=None)}
+    finally:
+        store.reset_session(b)
+
+
+def test_no_session_bound_sees_everything(store):
+    """A CLI run or a test has no conversation, and scoping it to nothing would show nothing."""
+    a = store.set_session("sess-alpha")
+    store.create_output_file("mine.txt", "x")
+    store.reset_session(a)
+    assert "mine.txt" in {f["filename"] for f in store.find_files()}

@@ -9,7 +9,9 @@ from flask import Flask, Response, jsonify, request, send_file, stream_with_cont
 from flask_cors import CORS
 from flasgger import Swagger
 
-from rag_pipeline.agent_file_store import require_file_record, resolve_file_id, save_uploaded_file
+from rag_pipeline.agent_file_store import (require_file_record, reset_session as reset_file_store_session,
+                                           resolve_file_id, save_uploaded_file,
+                                           set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from rag_pipeline.pipeline import run_pipeline
 
@@ -1469,33 +1471,41 @@ def agent_chat():
             return jsonify({"error": "Missing userQuery in request body."}), 400
 
         logger.info(f"Processing agent chat: {user_query[:100]}...")
-        raw = run_agent_chat(
-            user_input=user_query,
-            thread_id=normalized.get("thread_id"),
-            memory_id=normalized.get("memory_id"),
-            conversation_name=normalized.get("conversation_name"),
-            recent_k=normalized.get("recent_k"),
-            tool_strategy=normalized.get("tool_strategy", "granular"),
-            include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
-            mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
-            enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
-            use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
-            smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
-            forced_intent=normalized.get("forced_intent"),
-            file_paths=normalized.get("file_paths"),
-            file_ids=normalized.get("file_ids"),
-            skill_roots=normalized.get("skill_roots"),
-            verbose=bool(normalized.get("verbose", False)),
-            use_supervisor=normalized.get("use_supervisor"),
-            code_exec=normalized.get("code_exec"),
-            code_peer=normalized.get("code_peer"),
-            unified_peer=normalized.get("unified_peer"),
-            code_peer_model=normalized.get("code_peer_model"),
-            llm_provider=normalized.get("llm_provider"),
-            llm_model=normalized.get("llm_model"),
-            reasoning_effort=normalized.get("reasoning_effort"),
-        )
-        return jsonify(_format_agent_chat_result(raw)), 200
+        # Bind the conversation for the whole turn, so every file a tool writes records who
+        # wrote it and every lookup sees this conversation's files first. Set at the EDGE
+        # because nothing deeper knows what a session is. JWT will change where this id comes
+        # from, not what it does with it.
+        _session_token = set_file_store_session(normalized.get("thread_id"))
+        try:
+            raw = run_agent_chat(
+                user_input=user_query,
+                thread_id=normalized.get("thread_id"),
+                memory_id=normalized.get("memory_id"),
+                conversation_name=normalized.get("conversation_name"),
+                recent_k=normalized.get("recent_k"),
+                tool_strategy=normalized.get("tool_strategy", "granular"),
+                include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
+                mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
+                enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
+                use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
+                smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
+                forced_intent=normalized.get("forced_intent"),
+                file_paths=normalized.get("file_paths"),
+                file_ids=normalized.get("file_ids"),
+                skill_roots=normalized.get("skill_roots"),
+                verbose=bool(normalized.get("verbose", False)),
+                use_supervisor=normalized.get("use_supervisor"),
+                code_exec=normalized.get("code_exec"),
+                code_peer=normalized.get("code_peer"),
+                unified_peer=normalized.get("unified_peer"),
+                code_peer_model=normalized.get("code_peer_model"),
+                llm_provider=normalized.get("llm_provider"),
+                llm_model=normalized.get("llm_model"),
+                reasoning_effort=normalized.get("reasoning_effort"),
+            )
+            return jsonify(_format_agent_chat_result(raw)), 200
+        finally:
+            reset_file_store_session(_session_token)
     except ValueError as e:
         logger.error(f"Agent chat validation error: {str(e)}")
         return jsonify({"error": str(e)}), 400
@@ -1980,6 +1990,7 @@ def agent_chat_stream():
         @stream_with_context
         def generate():
             error_emitted = False
+            stream_session_token = set_file_store_session(normalized.get("thread_id"))
             try:
                 for item in stream_agent_chat_events(
                     user_input=user_query,
@@ -2184,6 +2195,10 @@ def agent_chat_stream():
                         yield _sse_event("agent_trace", trace_event)
                 yield _sse_event("error", error_payload)
 
+            finally:
+                # A stream that is cancelled mid-flight must not leave this thread bound to
+                # the conversation; the next request on it would inherit the scope.
+                reset_file_store_session(stream_session_token)
         return Response(
             generate(),
             mimetype="text/event-stream",

@@ -6,6 +6,7 @@ import os
 import shutil
 import threading
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -261,8 +262,34 @@ def resolve_file_id(file_id: str) -> Path:
     return path
 
 
+# Which conversation is writing. A ContextVar because the store is called from deep inside tool
+# code that has no idea what a session is — the same shape the streaming trace state uses, set
+# once per request at the edge. JWT will replace WHERE this value comes from, not what it does.
+_SESSION: ContextVar[Optional[str]] = ContextVar("agent_file_store_session", default=None)
+# Sentinel: `session=None` means "search every conversation", which is different from
+# "the caller did not say", and a default of None could not tell them apart.
+_UNSET = object()
+
+
+def set_session(session_id: Optional[str]) -> Any:
+    """Bind the conversation for this request. Returns a token for ContextVar.reset."""
+    return _SESSION.set(str(session_id).strip() or None if session_id else None)
+
+
+def reset_session(token: Any) -> None:
+    try:
+        _SESSION.reset(token)
+    except Exception:  # noqa: BLE001 - a stale token must not break a response
+        pass
+
+
+def current_session() -> Optional[str]:
+    return _SESSION.get()
+
+
 def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
-               kind: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+               kind: Optional[str] = None, limit: int = 20,
+               session: Any = _UNSET) -> List[Dict[str, Any]]:
     """Stored file records, newest first, optionally narrowed by name / extension / kind.
 
     A ``file_id`` has been the store's only handle, and a ``file_id`` is exactly what a later
@@ -280,6 +307,10 @@ def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
     """
     needle = (name or "").strip().lower()
     want_suffix = (suffix or "").strip().lower()
+    # THIS conversation's files by default. A record written before sessions existed has no
+    # `session` and stays visible to everyone: the store holds 1,325 of them and hiding the lot
+    # would break every reuse the demo depends on. Pass session=None to search across all.
+    want_session = current_session() if session is _UNSET else session
     out: List[Dict[str, Any]] = []
     for meta_path in _metadata_dir().glob("*.json"):
         try:
@@ -292,6 +323,9 @@ def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
         if want_suffix and not filename.lower().endswith(want_suffix):
             continue
         if needle and needle not in filename.lower():
+            continue
+        owner = record.get("session")
+        if want_session and owner and owner != want_session:
             continue
         try:
             path = _record_path(record)
@@ -378,6 +412,7 @@ def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
         "file_id": file_id,
         "filename": original_name,
         "kind": "upload",
+        "session": current_session(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
@@ -414,6 +449,10 @@ def create_output_file(filename: str, content: str, overwrite: bool = False) -> 
         "file_id": file_id,
         "filename": safe_name,
         "kind": "output",
+        # Which conversation produced this. Absent on everything written before this existed,
+        # and find_files treats that absence as "visible to all" so the demo's existing 1,325
+        # files stay reachable rather than vanishing.
+        "session": current_session(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
@@ -458,6 +497,10 @@ def create_output_file_from_path(
         "file_id": file_id,
         "filename": safe_name,
         "kind": "output",
+        # Which conversation produced this. Absent on everything written before this existed,
+        # and find_files treats that absence as "visible to all" so the demo's existing 1,325
+        # files stay reachable rather than vanishing.
+        "session": current_session(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
