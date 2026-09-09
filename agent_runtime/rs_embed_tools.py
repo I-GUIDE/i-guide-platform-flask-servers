@@ -937,12 +937,13 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         user refers to an embedding, a layer or a region worked on earlier and the file_id is not
         to hand; then pass that file_id to predict_from_package or align_embedding_colors.
 
-        SCOPE: the file store records no conversation, so this lists what the DEPLOYMENT has
-        saved, not only this conversation. Packages from earlier or other conversations appear
-        too. Match on the region and months rather than on the filename — the default export
-        name is reused for every unnamed region, so one name covers many different places — and
-        do not describe a package as "yours" or "the one from earlier" on the strength of its
-        name alone.
+        SCOPE: this conversation's packages PLUS the deployment's shared ones — every package
+        saved before files were attributed to a conversation, which is most of them. Another
+        conversation's new package is not listed; a shared older one is. So match on the region
+        and months rather than on the filename — the default export name was reused for every
+        unnamed region, so one name covers many different places — and do not describe a package
+        as "yours" or "the one from earlier" on the strength of its name alone. For what THIS
+        conversation actually made, list_conversation_files is the authority.
 
         `has_head` says whether a pretrained head exists for that model, so a package that
         cannot be predicted from is visible as such before anything is attempted.

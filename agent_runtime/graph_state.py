@@ -69,6 +69,7 @@ FILE_TOOL_NAMES: set[str] = {
     "inspect_file_for_analysis",
     "write_text_file",
     "write_output_file",
+    "list_conversation_files",
 }
 
 SKILL_TOOL_NAMES: set[str] = {

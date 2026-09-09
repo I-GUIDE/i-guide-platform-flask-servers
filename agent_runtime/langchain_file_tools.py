@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .file_store import create_output_file, get_file_record, resolve_file_id, storage_root
+from .file_store import (create_output_file, current_session, find_files, get_file_record,
+                         resolve_file_id, storage_root)
 
 DEFAULT_MAX_CHARS = 12000
 DEFAULT_MAX_ROWS = 20
@@ -226,6 +227,46 @@ def write_output_file_tool(filename: str, content: str, overwrite: bool = False)
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
+
+# How many of this conversation's files to describe. Generous: the point of the tool is that the
+# answer is COMPLETE, and a turn that produced twelve artifacts must not be told about ten.
+_CONVERSATION_FILE_MAX = 200
+
+
+def list_conversation_files_tool(name: Optional[str] = None, limit: int = 50) -> str:
+    """Every file THIS conversation has made or been given, newest first."""
+    session = current_session()
+    capped = max(1, min(int(limit or 50), _CONVERSATION_FILE_MAX))
+    # include_unowned=False: records written before sessions existed belong to no conversation,
+    # and answering "what have you saved for me" with the deployment's whole history would be
+    # worse than answering with nothing.
+    records = find_files(name, limit=capped + 1, include_unowned=False)
+    files = [{
+        "file_id": r.get("file_id"),
+        "filename": r.get("filename"),
+        "kind": r.get("kind"),
+        "size_bytes": r.get("size_bytes"),
+        "download_url": r.get("download_url"),
+    } for r in records[:capped]]
+
+    payload: Dict[str, Any] = {"ok": True, "count": len(files), "files": files}
+    if len(records) > capped:
+        payload["truncated"] = f"showing the {capped} newest; ask for more with a higher limit"
+    if not session:
+        # No conversation bound (a CLI run, or a request that never went through the API edge).
+        # Saying "you have no files" would be a lie of a different kind, so name the reason.
+        payload["scope_unknown"] = ("No conversation is bound to this request, so files cannot "
+                                    "be attributed to it. This list is not authoritative.")
+    elif not files:
+        payload["note"] = ("Nothing has been saved in this conversation yet. Files from other "
+                           "conversations are deliberately not listed.")
+    else:
+        payload["note"] = ("This is the complete list for this conversation. Quote these "
+                           "filenames and links rather than any remembered from the transcript, "
+                           "and do not describe a file as saved unless it appears here.")
+    return json.dumps(payload, ensure_ascii=True, default=str)
+
+
 def make_langchain_file_tools() -> List[Any]:
     try:
         from langchain_core.tools import StructuredTool
@@ -273,11 +314,24 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
+        StructuredTool.from_function(
+            func=list_conversation_files_tool,
+            name="list_conversation_files",
+            description=(
+                "List the files THIS conversation has produced or been given, newest first, with "
+                "file_id, filename and download_url. USE IT whenever the user asks what files "
+                "exist, what was saved, or for a link to something made earlier — the transcript "
+                "is not a reliable record of that and earlier links may have been dropped from "
+                "context. Optional `name` filters by filename substring."
+            ),
+            metadata={"category": "io"},
+        ),
     ]
 
 
 __all__ = [
     "inspect_file_for_analysis_tool",
+    "list_conversation_files_tool",
     "make_langchain_file_tools",
     "read_text_file_tool",
     "write_output_file_tool",

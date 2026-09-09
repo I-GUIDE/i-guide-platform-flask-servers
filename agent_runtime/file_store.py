@@ -289,7 +289,8 @@ def current_session() -> Optional[str]:
 
 def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
                kind: Optional[str] = None, limit: int = 20,
-               session: Any = _UNSET) -> List[Dict[str, Any]]:
+               session: Any = _UNSET,
+               include_unowned: bool = True) -> List[Dict[str, Any]]:
     """Stored file records, newest first, optionally narrowed by name / extension / kind.
 
     A ``file_id`` has been the store's only handle, and a ``file_id`` is exactly what a later
@@ -301,6 +302,11 @@ def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
     ``name`` matches as a case-insensitive substring, so a filename remembered imprecisely still
     finds its file. Ordering is by mtime, because records carry no timestamp of their own; ties
     break on file_id so the result is deterministic.
+
+    ``include_unowned=False`` narrows the result to records this conversation actually wrote.
+    The default keeps unstamped records visible, which is right for REUSE — a saved embedding
+    package is worth offering whoever asks — and wrong for a question about this conversation,
+    where "the files you made" must not be answered with 1,325 files from everyone else.
 
     There is no index — records are one json file each — so this scans the metadata directory,
     which is the same scan ``create_output_file_from_path`` already does to honour ``overwrite``.
@@ -326,6 +332,8 @@ def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
             continue
         owner = record.get("session")
         if want_session and owner and owner != want_session:
+            continue
+        if want_session and not owner and not include_unowned:
             continue
         try:
             path = _record_path(record)
