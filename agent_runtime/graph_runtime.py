@@ -9,6 +9,7 @@ the Flask API layer.
 from __future__ import annotations
 
 import argparse
+import contextvars
 import json
 import os
 import queue
@@ -356,7 +357,14 @@ def stream_agent_query_events(
         finally:
             _enqueue({"event": "__worker_done__", "data": {}})
 
-    worker = threading.Thread(target=_worker, name="agent-stream-worker", daemon=True)
+    # The worker inherits the REQUEST's context. ContextVars do not cross threads, so anything
+    # bound at the edge for the duration of a turn — the file store's session, and any future
+    # per-request scope — was simply absent in the code that does the work: a file written by a
+    # tool came out with session=None while the request had one bound. copy_context() takes a
+    # snapshot here, on the caller's side, and ctx.run executes the worker inside it.
+    _ctx = contextvars.copy_context()
+    worker = threading.Thread(target=lambda: _ctx.run(_worker),
+                              name="agent-stream-worker", daemon=True)
     worker.start()
 
     # Emit a keepalive whenever the agent goes quiet (long LLM turn / sandbox run) so no

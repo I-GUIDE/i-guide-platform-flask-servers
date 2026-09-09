@@ -187,3 +187,37 @@ def test_no_session_bound_sees_everything(store):
     store.create_output_file("mine.txt", "x")
     store.reset_session(a)
     assert "mine.txt" in {f["filename"] for f in store.find_files()}
+
+
+def test_the_session_survives_the_worker_thread():
+    """The agent runs in a worker thread (graph_runtime), and ContextVars do NOT cross threads.
+
+    Bound at the request edge and read in tool code, the session came out None on the real path
+    while every unit test passed — the tests all ran on one thread. copy_context() on the
+    caller's side is what carries it over.
+    """
+    import contextvars
+    import threading
+
+    from agent_runtime import file_store
+
+    seen = []
+    token = file_store.set_session("sess-worker")
+    try:
+        def work():
+            seen.append(file_store.current_session())
+
+        # what the code does now: snapshot here, run there
+        ctx = contextvars.copy_context()
+        t = threading.Thread(target=lambda: ctx.run(work))
+        t.start(); t.join()
+
+        # and what it did before, for contrast
+        plain = []
+        t2 = threading.Thread(target=lambda: plain.append(file_store.current_session()))
+        t2.start(); t2.join()
+    finally:
+        file_store.reset_session(token)
+
+    assert seen == ["sess-worker"], "the worker must see the request's session"
+    assert plain == [None], "and without copy_context it does not — this is the bug"
