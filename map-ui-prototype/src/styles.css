@@ -351,8 +351,19 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
    switch between two setups of one page, not a second application. */
 .tabs { display: flex; gap: 2px; margin-left: 18px; background: var(--soft); padding: 3px; border-radius: 999px; position: relative; }
 .tab { font-size: 13px; font-weight: 600; padding: 5px 14px; border: 0; border-radius: 999px;
-       background: transparent; color: #5b6167; cursor: pointer; white-space: nowrap; }
+       background: transparent; color: #5b6167; cursor: pointer; white-space: nowrap;
+       /* Matches the lens's own transition below, so the label's colour arrives WITH the lens
+          instead of snapping the instant React flips the .on class — a plain class swap beat
+          the travelling lens by the full 460ms. */
+       transition: color 460ms cubic-bezier(.22, 1.18, .36, 1); }
 .tab:hover:not(.on) { color: var(--ink); }
+/* The generic `button:hover:not(:disabled) { background: var(--soft) }` above is specificity
+   (0,2,1) and outranks `.tab.on`'s (0,2,0) `background: none`, so hovering the SELECTED tab
+   painted solid grey OVER the lens. Invisible while the lens is white on a grey track, which is
+   why it shipped; worst right after a click, with the cursor still sitting there while the lens
+   travels. Unselected tabs lose nothing — that hover fill is the same grey as the track, and
+   the affordance is the label darkening on the line above. */
+.tab:hover:not(:disabled) { background: none; }
 /* The selected tab no longer paints its own background: the lens behind it is the selection,
    and two of them would double the highlight during the travel. */
 .tab.on { background: none; color: var(--ink); box-shadow: none; }
