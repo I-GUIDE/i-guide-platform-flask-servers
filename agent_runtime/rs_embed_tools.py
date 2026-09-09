@@ -1101,15 +1101,32 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             out_png = Path(tempfile.mkdtemp(prefix="rsembed_shared_")) / f"{stem}.png"
             Image.fromarray((img * 255).astype(np.uint8)).save(out_png)
             rec = create_output_file_from_path(out_png, filename=out_png.name)
+            # RE-COLOUR IN PLACE. This is the same embedding of the same region, period and
+            # model as the layer embed_region already drew — only the colour basis changed — so
+            # it takes that layer's identity and the client swaps it rather than stacking a
+            # second raster on top. Emitting a new id put every year on the map TWICE, and the
+            # duplicate was the misleading one: the per-run colours this tool exists to replace,
+            # sitting next to the aligned ones with nothing to tell them apart but a label.
+            #
+            # Reconstructed from the package's OWN manifest rather than passed in, because the
+            # embed may have happened in an earlier turn. `start`/`end` stay in the identity, so
+            # one place at several periods — the documented case, and the case that produced
+            # this bug report — remains several layers.
+            superseded = None
+            manifest = entry["meta"] if isinstance(entry.get("meta"), dict) else {}
+            if manifest.get("start") and manifest.get("end"):
+                superseded = _layer_id("pca", _region_tag(None, bbox), bbox=_round_bbox(bbox),
+                                       model=model, start=manifest["start"],
+                                       end=manifest["end"])
             layers.append(_raster_layer(
                 rec, bbox, _layer_label(f"{model} embedding (shared PCA)", tag),
-                # `package` is what makes this raster THIS one: bbox, model and basis are
-                # identical for every layer in the call, so two packages of the same region —
-                # one place at two periods, the documented case — collided on a single id and
-                # the per-call dedup dropped the second before it left the process.
-                _layer_id("sharedpca", _region_tag(None, bbox),
-                          package=str(entry["file_id"]), bbox=_round_bbox(bbox),
-                          model=model, basis=fitted_basis),
+                # Falls back to an identity of its own when the manifest cannot say which layer
+                # this supersedes: an extra layer is a worse map, but a WRONG replacement would
+                # overwrite a raster of somewhere else. `package` is what makes this raster THIS
+                # one, since bbox, model and basis are identical for every layer in the call.
+                superseded or _layer_id("sharedpca", _region_tag(None, bbox),
+                                        package=str(entry["file_id"]), bbox=_round_bbox(bbox),
+                                        model=model, basis=fitted_basis),
                 # A re-coloured raster points at the SAME vectors as the layer it replaces —
                 # only the colours were refitted — so the pointer has to survive the re-render
                 # or aligning the colours would cost the layer its data.
@@ -1134,6 +1151,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                     "unlike the per-run rasters embed_region produces, which are each "
                     "normalised on their own pixels and are NOT comparable to each other. "
                     "They are still not land-cover classes.",
+            # The answer used to describe these as new layers, which read as "now there are six"
+            # when the map had three. Each re-colour takes over the layer it supersedes, so the
+            # count does not change — say re-coloured, not added.
+            "layers": "re-coloured in place: each takes over the layer the region already had "
+                      "on the map, so no year is drawn twice",
         }
         if step > 1:
             out["basis_fitted_on"] = (f"every {step}th pixel ({_PCA_FIT_MAX_PX:,} cap); all "

@@ -175,3 +175,73 @@ def test_the_same_package_passed_twice_does_not_raise(monkeypatch, tmp_path):
     out, saved = _run(monkeypatch, tmp_path, pkgs)
     assert out["ok"] is True, out
     assert len(saved) == 3
+
+
+# --- re-colouring replaces the layer it supersedes -----------------------------
+def _dated_package(tmp_path, name, grid, bbox, start, end):
+    """A package whose manifest records its months, as the service actually writes it."""
+    p = tmp_path / f"{name}.npz"
+    meta = json.dumps({
+        "geometry": {"type": "bbox", "minlon": bbox[0], "minlat": bbox[1],
+                     "maxlon": bbox[2], "maxlat": bbox[3]},
+        "start": start, "end": end,
+        "models": [{"model": MODEL, "dim": DIMS, "grid_saved": True}],
+    })
+    np.savez(p, **{f"grid__{MODEL}": grid.astype(np.float32),
+                   f"pooled__{MODEL}": grid.reshape(DIMS, -1).mean(1).astype(np.float32),
+                   "meta": np.array(meta)})
+    return p
+
+
+def _embed_region_layer_id(bbox, start, end):
+    """The id embed_region gave the layer this re-colour supersedes."""
+    from agent_runtime.rs_embed_tools import _layer_id, _region_tag, _round_bbox
+
+    return _layer_id("pca", _region_tag(None, bbox), bbox=_round_bbox(bbox),
+                     model=MODEL, start=start, end=end)
+
+
+def _ids(out):
+    layers = out.get("map_layers") or ([out["map_layer"]] if out.get("map_layer") else [])
+    return [layer["id"] for layer in layers]
+
+
+def test_a_recolour_takes_over_the_layer_it_replaces(monkeypatch, tmp_path):
+    """The same embedding re-coloured is the SAME layer, not a second one.
+
+    Emitting a fresh id put each year on the map twice, and the duplicate was the misleading
+    half: the per-run colours this tool exists to replace, sitting beside the aligned ones with
+    only a label to tell them apart.
+    """
+    packages = {
+        "file_2018": _dated_package(tmp_path, "y2018", _grid(0, 1.0), BBOX_A, "2018-06", "2018-09"),
+        "file_2022": _dated_package(tmp_path, "y2022", _grid(1, 4.0), BBOX_A, "2022-06", "2022-09"),
+    }
+    out, _saved = _run(monkeypatch, tmp_path, packages)
+    assert out["ok"] is True
+    assert _ids(out) == [_embed_region_layer_id(BBOX_A, "2018-06", "2018-09"),
+                         _embed_region_layer_id(BBOX_A, "2022-06", "2022-09")]
+
+
+def test_one_place_at_several_periods_stays_several_layers(monkeypatch, tmp_path):
+    """The regression guard. Collapsing periods onto one id is the bug this once had."""
+    packages = {
+        "file_2018": _dated_package(tmp_path, "y2018", _grid(0, 1.0), BBOX_A, "2018-06", "2018-09"),
+        "file_2020": _dated_package(tmp_path, "y2020", _grid(2, 2.0), BBOX_A, "2020-06", "2020-09"),
+        "file_2022": _dated_package(tmp_path, "y2022", _grid(1, 4.0), BBOX_A, "2022-06", "2022-09"),
+    }
+    out, _saved = _run(monkeypatch, tmp_path, packages)
+    assert len(set(_ids(out))) == 3
+
+
+def test_a_package_that_cannot_say_what_it_supersedes_keeps_its_own_id(monkeypatch, tmp_path):
+    """No months in the manifest means no safe replacement.
+
+    An extra layer is a worse map; a WRONG replacement would overwrite a raster of somewhere
+    else, so the undated case falls back to an identity of its own.
+    """
+    packages = _two_regions(tmp_path)  # this helper's manifests carry no start/end
+    out, _saved = _run(monkeypatch, tmp_path, packages)
+    ids = _ids(out)
+    assert len(set(ids)) == 2
+    assert all("sharedpca" in i for i in ids)
