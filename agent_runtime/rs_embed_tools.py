@@ -1525,10 +1525,20 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
 
         There is NO tile cap by default, so the sweep fetches every tile the polygons touch
         and the answer covers all of them. Each tile is one request to the imagery provider,
-        and a large layer can need hundreds. Set `max_tiles` when a bounded, partial answer is
-        what you want -- a quick look at a big region -- and leave it unset when the answer has
-        to be complete. Whatever the cap drops is reported as `truncated`, and the zones under
-        the dropped tiles come back with `pixels == 0`.
+        and a large layer can need hundreds.
+
+        DO NOT set `max_tiles` for an area the user named — a city, a county, a boundary from
+        admin_boundary. A cap there produces a map that is WRONG IN A WAY THE PICTURE DOES NOT
+        SHOW: the raster still fills its frame, the zones under the dropped tiles come back with
+        `pixels == 0`, and only the `truncated` field says so. Capping a city at 20 of its 44
+        tiles has already happened and the answer had to disown its own map. Set it only for an
+        explicitly exploratory look at a large region, and say in the answer that the result is
+        partial. Whatever the cap drops is reported as `truncated`.
+
+        NOT an embedding package. This returns per-zone vectors as a CSV, where embed_region
+        saves an .npz holding a per-pixel grid — so align_embedding_colors, predict_from_package
+        and anything else that reads a package CANNOT consume this output. To put two areas on
+        one shared colour basis today, embed each with embed_region and align those packages.
 
         Returns a CSV of per-zone vectors ready for machine learning (use fit_zone_model),
         and puts TWO things on the map: a PCA-RGB picture of the pixels themselves, cut to the
@@ -1538,6 +1548,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         partition without error.
         """
         tmp = None
+        # Outside the guard below: that try/except exists because `_stage` is missing in some
+        # builds, and its fallback branch does not re-import everything. map_layers has no
+        # optional dependency, so putting this there left the name UNBOUND on exactly the path
+        # the fallback takes — the layer then failed with "zones computed but not mapped".
+        from agent_runtime.map_layers import boundary_layer_id
         try:
             import numpy as np
 
@@ -1627,7 +1642,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             grouped = {z["zone_id"]: z for z in with_px if z.get("group")}
             keep = [i for i, zid in enumerate(ids) if zid in grouped]
             if keep:
-                sub = gdf.iloc[keep][["geometry"]].copy()
+                carry = ["geometry"] + [c for c in ("NAME",) if c in gdf.columns]
+                sub = gdf.iloc[keep][carry].copy()
                 sub["zone_id"] = [ids[i] for i in keep]
                 sub["pixels"] = [grouped[ids[i]]["pixels"] for i in keep]
                 sub["area_km2"] = [round(grouped[ids[i]]["area_km2"], 4) for i in keep]
@@ -1644,16 +1660,31 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 zone_tag = _region_tag(name, gdf.total_bounds)
                 if len(keep) == 1:
                     # "zone groups (k=1)" is a cluster analysis of one thing, and a legend with
-                    # a single entry explains nothing. Say which zone it is: the model was
+                    # a single entry explains nothing. Say which PLACE it is: the model was
                     # adding a SECOND layer of the same polygon because this one did not read
                     # as the area it had asked about.
+                    #
+                    # Prefer the polygon's own NAME over the zone id. admin_boundary writes it
+                    # and labels its layer with it, so "Urbana city — gse embedded" reads as the
+                    # thing the user asked about where "gse embedded zone 1777005" does not.
+                    place = str(name or "").strip()
+                    if not place and "NAME" in getattr(sub, "columns", []):
+                        place = str(sub["NAME"].iloc[0] or "").strip()
+                    if not place:
+                        place = f"zone {sub['zone_id'].iloc[0]}"
                     layer = {"url": rec.get("download_url"),
-                             # The region too: without zone_id_field the ids are row indices,
-                             # so every one-polygon layer is zone "0" and one city's outline
-                             # replaces another's.
-                             "id": _layer_id("zone", file_id, **zone_content,
-                                             zone=str(sub["zone_id"].iloc[0])),
-                             "label": f"{model} embedded zone {sub['zone_id'].iloc[0]}",
+                             # TAKES THE PLACE OF the outline this polygon file already has on
+                             # the map: admin_boundary keys its layer on the same file_id, so
+                             # this redraws it with what the embedding found inside instead of
+                             # stacking a second copy of the same city beside it.
+                             #
+                             # Only for ONE zone. The multi-zone branch below keeps its own
+                             # k-bearing id on purpose — asking for 3 groups and then 6 is two
+                             # analyses that must coexist — but a single zone has no clustering
+                             # to tell apart, k is always 1, and the layer is the input polygon
+                             # with three attributes added.
+                             "id": boundary_layer_id(file_id),
+                             "label": f"{place} — {model} embedded",
                              # Outline, not fill: this layer sits over the pixel image of the
                              # same polygon, and a filled one covers the picture it frames.
                              "render": "shapes", "outline": True,
@@ -1707,7 +1738,10 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                         "pixels_max": max((z["pixels"] for z in with_px), default=0)},
             "note": "Each zone's vector is the MEAN of the pixels inside it. `pixels` is its "
                     "support: a model fitted on small zones is extrapolating when applied to "
-                    "a much larger one, because pooling averages away variance.",
+                    "a much larger one, because pooling averages away variance. These vectors "
+                    "are a CSV, not an embedding package (.npz), so align_embedding_colors and "
+                    "predict_from_package cannot read them — the two rasters this draws each "
+                    "have their OWN PCA basis and are not comparable by colour.",
         }
         if res.get("tiles_capped"):
             # tiles_needed, not tiles_planned: the grid counts empty cells the sweep skips for

@@ -53,6 +53,21 @@ _GEO_TOOLS: Dict[str, tuple] = {
 }
 
 
+def boundary_layer_id(file_id: str) -> str:
+    """The id of the map layer that SHOWS a polygon file, keyed on the file itself.
+
+    Two tools draw the same polygons: admin_boundary puts the outline up, and embed_zones then
+    redraws it with what the embedding found inside. They arrived as separate layers — a city
+    appeared twice in the layer list, once as "Urbana city" and once as "gse embedded zone
+    1777005" — because admin_boundary set no id at all and fell back to a slug of its LABEL,
+    which embed_zones has no way to reconstruct from the file_id it was handed.
+
+    Keying on the file they both hold means the second can take the first's place instead of
+    stacking on it, and means neither has to know the other's wording.
+    """
+    return f"boundary-{str(file_id or '').strip()}"
+
+
 def _coerce_obj(output: Any) -> Optional[Any]:
     """Best-effort parse of a tool output into a dict/list."""
     if output is None:

@@ -570,3 +570,32 @@ def test_build_map_layer_drops_empty_pointer_fields():
                   "embedding": {"file_id": "file_abc", "filename": None,
                                 "models_in_package": []}})
     assert out["embedding"] == {"file_id": "file_abc"}
+
+
+# --- one polygon, one layer ----------------------------------------------------
+def test_the_boundary_and_its_embedding_are_one_layer():
+    """A city appeared TWICE in the layer list: once as the boundary admin_boundary drew, and
+
+    again as "gse embedded zone 1777005" when embed_zones redrew the same polygon with what it
+    found inside. Both are keyed on the polygon FILE now, so the second replaces the first.
+    """
+    from agent_runtime.map_layers import boundary_layer_id
+
+    assert boundary_layer_id("file_abc") == boundary_layer_id(" file_abc ")
+    assert boundary_layer_id("file_abc") != boundary_layer_id("file_def")
+
+
+def test_the_boundary_layer_carries_that_id():
+    """admin_boundary set no id at all, so build_map_layer invented one from its LABEL —
+
+    which embed_zones cannot reconstruct from the file_id it is handed.
+    """
+    from agent_runtime.map_layers import boundary_layer_id, build_map_layer
+
+    built = build_map_layer("admin_boundary", {"map_layer": {
+        "url": "/f/1/download", "label": "Urbana city", "render": "shapes",
+        "id": boundary_layer_id("file_poly1"), "source": "analysis",
+        "count": 1, "outline": True}})
+    assert built is not None
+    assert built["id"] == "boundary-file_poly1"
+    assert built["outline"] is True

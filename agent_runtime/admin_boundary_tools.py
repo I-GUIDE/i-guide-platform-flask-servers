@@ -26,6 +26,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent_runtime.map_layers import boundary_layer_id
+
 logger = logging.getLogger(__name__)
 
 TIGERWEB_URL = os.getenv(
@@ -351,7 +353,13 @@ def make_admin_boundary_tools() -> List[Any]:
                           "zone_id_field='GEOID') embeds each of these polygons"),
             # Drawn as an OUTLINE: a boundary is a frame for whatever is analysed inside it,
             # and a filled polygon would hide the raster embed_zones puts underneath.
+            # Keyed on the FILE, not on the label. embed_zones redraws these same polygons
+            # with what it found inside them, and it knows this file_id — so an explicit id
+            # lets it take this layer's place instead of adding a second outline of the same
+            # city. Without one, build_map_layer invents `agent-<slug of the label>`, which
+            # nothing downstream can reconstruct.
             "map_layer": {"url": rec.get("download_url"), "label": label, "render": "shapes",
+                          "id": boundary_layer_id(str(rec.get("file_id") or "")),
                           "source": "analysis", "count": len(feats), "outline": True},
         }
         if truncated:
