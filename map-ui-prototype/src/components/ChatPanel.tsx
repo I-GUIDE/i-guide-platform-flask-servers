@@ -32,14 +32,14 @@ const RS_MODELS: { group: string; ids: string[] }[] = [
 
 const RS_YEARS = ['2024', '2023', '2022', '2021', '2020', '2019', '2018'];
 
-// embed_region truncates to _MAX_MODELS_PER_CALL SILENTLY (rs_embed_tools.py:37,386), so a
+// embed_region truncates to _MAX_MODELS_PER_CALL SILENTLY (rs_embed_tools._MAX_MODELS_PER_CALL), so a
 // sixth pick would vanish without a word. Stop at the cap in the UI, where it can be explained.
 const RS_MAX_MODELS = 5;
 // How tall the composer may grow before it starts scrolling. Four lines holds every staged
 // operation question, and stops a pasted wall of text from eating the conversation above it.
 const COMPOSER_MAX_ROWS = 4;
 // The second group runs the encoder at request time. Every model in one embed_region call shares
-// a SINGLE 600s budget (rs_embed_tools.py:35), so two of these together can blow it and lose the
+// a SINGLE 600s budget (rs_embed_tools._TIMEOUT_S, 600s), so two of these together can blow it and lose the
 // whole call — including the models that had already finished.
 const RS_ONTHEFLY = ['clay', 'prithvi', 'terramind'];
 

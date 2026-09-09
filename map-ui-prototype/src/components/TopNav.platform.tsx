@@ -30,7 +30,14 @@ export function TopNavPlatform(p: TopNavProps) {
         <button className="navbtn" title="Past conversations" onClick={p.onToggleHistory}>
           History{p.sessionCount ? ` (${p.sessionCount})` : ''}
         </button>
-        <button className="navbtn gear" title="Connection settings" onClick={p.onToggleSettings}>⚙</button>
+        {/* Gated the same way as the rs-embed header: in DEMO_MODE there is no key to enter
+            and no endpoint worth changing. This variant is selected at BUILD time and Rollup
+            drops it from the default bundle, so the gap was latent rather than live — but a
+            platform build with DEMO_MODE on would have shown the dialog the switch exists to
+            hide, and the two headers must not disagree about that. */}
+        {!p.demoMode && (
+          <button className="navbtn gear" title="Connection settings" onClick={p.onToggleSettings}>⚙</button>
+        )}
         <span className="jpy" title="Jupyter (placeholder)">jpy</span>
         <span className="avatar" title="Account (placeholder)" />
       </div>

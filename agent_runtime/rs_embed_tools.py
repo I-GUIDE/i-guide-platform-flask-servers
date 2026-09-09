@@ -717,7 +717,10 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                         "file_id": rec["file_id"], "filename": rec.get("filename"),
                         "model": layer_model, "months": f"{start}..{end}",
                         "models_in_package": pkg.get("models") or []}
-            # The service caps which grids go into the export (300x300 cells). Say so: a
+            # The service DECIMATES an oversized grid rather than dropping it — the export cap
+            # became a stride, recorded per entry as grid_stride — so a model missing from
+            # grids_saved now means the export genuinely failed for it, not that the region was
+            # too big. Say so: a
             # missing full-resolution grid is otherwise invisible until someone loads the file.
             else:
                 # The package is the ONLY input to every composed operation — segmentation,
@@ -1052,8 +1055,9 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
         Pass the `file_id` of each region's embedding package — the .npz embed_region saves as
         `embedding_package.file_id`. They must all carry a grid for the same model; a package
-        whose grid exceeded the export cap holds only the pooled vector and has no pixels to
-        re-colour, and this says so rather than quietly dropping it.
+        whose export genuinely failed holds only the pooled vector and has no pixels to
+        re-colour, and this says so rather than quietly dropping it. A grid that was merely too
+        LARGE is not that case: the service decimates it to a stride and still exports it.
 
         Costs nothing at the imagery provider: it reuses embeddings already paid for, so it is
         always cheaper than embedding the regions again, and it works on regions embedded in
@@ -1091,7 +1095,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             if not entry["grids"]:
                 problems.append({"file_id": fid,
                                  "error": "this package holds the pooled vector only — its "
-                                          "grid exceeded the export cap, so there are no "
+                                          "grid export failed, so there are no "
                                           "pixels to re-colour"})
                 continue
             loaded.append(entry)
