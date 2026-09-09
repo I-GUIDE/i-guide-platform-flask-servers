@@ -602,10 +602,21 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         only for POINT layers; for polygons use embed_zones, which keeps their shape.
         `start`/`end` are months, "YYYY-MM".
 
-        COMPOSING FROM THE PACKAGE. There is no segment / change / predict tool: the embedding is
-        the primitive and the rest is code over the .npz this saves. Stage it into execute_code by
-        passing `embedding_package.file_id` in `input_files` — a file_id an earlier TOOL produced
-        works, not just an upload — and load it with numpy:
+        COMPOSING FROM THE PACKAGE. There is no segment or change tool: the embedding is the
+        primitive and clustering it, or differencing it across periods, is code over the .npz
+        this saves. PREDICTION IS DIFFERENT — do not write code for it. The trained heads live on
+        the service and are never exported, so predict_from_package is the only route to them;
+        list_prediction_heads says what has been trained. Two more tools do work you would
+        otherwise write badly: align_embedding_colors puts several regions on ONE shared colour
+        basis (fitting a PCA per region and comparing the colours is the mistake it exists to
+        prevent), and list_embedding_packages finds a package saved in an earlier turn when the
+        file_id is no longer to hand — predict_from_package and align_embedding_colors both take
+        a filename as well as an id.
+
+        Stage the package into execute_code by passing `embedding_package.file_id` in
+        `input_files` — a file_id an earlier TOOL produced works, not just an upload. Staging has
+        a 200 MB budget across everything attached, and a package carrying a full grid can
+        approach it, so stage the one package you need rather than several. Load it with numpy:
 
             grid__<model>    (D, H, W) float32 — the per-pixel embedding, north-up (row 0 = maxlat)
             pooled__<model>  (D,) float32      — one vector for the whole region

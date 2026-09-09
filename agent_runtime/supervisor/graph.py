@@ -3155,8 +3155,14 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         try:
             from agent_runtime.rs_embed_tools import make_rs_embed_tools
             tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - a broken toolset must not take the whole turn down
+            # LOGGED, not swallowed. This guard exists for a missing optional dependency, but it
+            # catches everything: a NameError from a bad edit to rs_embed_tools silently removes
+            # all nine remote-sensing tools, and the turn then answers "I have no way to embed a
+            # region" — indistinguishable, from the outside, from the service being down. One
+            # such NameError reached a merge in this repo and only 32 unit tests caught it.
+            logger.exception("remote-sensing toolset failed to build; those tools are UNAVAILABLE "
+                             "this turn")
         # Per-zone embeddings + the model fitted on them. These used to be gated on attached
         # files, because a polygon layer could only arrive by upload. admin_boundary can now
         # produce one from a place name mid-turn, so gating them here would hide the tool that
@@ -3629,8 +3635,14 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         try:
             from agent_runtime.rs_embed_tools import make_rs_embed_tools
             tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - a broken toolset must not take the whole turn down
+            # LOGGED, not swallowed. This guard exists for a missing optional dependency, but it
+            # catches everything: a NameError from a bad edit to rs_embed_tools silently removes
+            # all nine remote-sensing tools, and the turn then answers "I have no way to embed a
+            # region" — indistinguishable, from the outside, from the service being down. One
+            # such NameError reached a merge in this repo and only 32 unit tests caught it.
+            logger.exception("remote-sensing toolset failed to build; those tools are UNAVAILABLE "
+                             "this turn")
         # Per-zone embeddings + the model fitted on them. These used to be gated on attached
         # files, because a polygon layer could only arrive by upload. admin_boundary can now
         # produce one from a place name mid-turn, so gating them here would hide the tool that

@@ -236,7 +236,7 @@
 
   <section>
     <div class="fam-head">
-      <h2>Satellite embeddings</h2><span class="n">9 tools</span>
+      <h2>Satellite embeddings</h2><span class="n">10 tools</span>
       <span class="src">rs_embed_tools → rs-embed service</span>
     </div>
     <p class="fam-note">Remote-sensing foundation models over a region you draw, a region you name, or every polygon in
@@ -246,6 +246,7 @@
       return in seconds; the other seventeen are computed on the fly, and each takes either a single image or a
       timeseries.</p>
     <div class="tools">
+      <div class="tool"><code>add_raster_layer</code><p>Drape a georeferenced image the agent produced itself &mdash; a clustering, a difference surface, anything computed in <code>execute_code</code> &mdash; over its extent. Without it, pixels computed outside the embedding tools had no way onto the map.</p><div class="out"><span class="chip map">Map</span></div></div>
       <div class="tool"><code>embed_region</code><p>Embed a region with one or more models and put the result on the map as a raster layer, plus the vectors to download.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>embed_zones</code><p>One embedding vector <em>per polygon</em> for a whole layer &mdash; census tracts, catchments, parcels &mdash; keyed by an id column, optionally clustered into look-alike groups and mapped as categories. This is the many-polygon counterpart to <code>embed_region</code>; a date range narrows the imagery for on-the-fly models. Tile budget is finite, so it reports how many zones actually received pixels rather than silently embedding a subset.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>fit_zone_model</code><p>Fit a model on zone embeddings against a column you supply &mdash; the supervised step after <code>embed_zones</code>, for when no pretrained head fits your target.</p><div class="out"><span class="chip file">File</span></div></div>
@@ -365,6 +366,6 @@
   <footer>
     <span>Enumerated from the running <code>agent-api</code> container, 2026-09-03</span>
     <span>Branch <code>prototype</code></span>
-    <span>52 tools in eight families, plus <code>execute_code</code> and four file tools</span>
+    <span>53 tools in eight families, plus <code>execute_code</code> and four file tools</span>
   </footer>
 </div>
