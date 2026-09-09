@@ -728,7 +728,15 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             out["failed"] = failed
         if pkg:
             rec = _fetch_package(str(res.get("download_url") or ""),
-                                 f"{_slug(name or 'embedding')}_vectors")
+                                 # NOT "embedding_vectors" for everything unnamed. That default
+                                 # gave 32 of the 73 stored packages the same filename, so a
+                                 # later turn naming one could not be answered — the ambiguity
+                                 # refusal exists because of this line. Region, models and
+                                 # period are all known here and make the name identify the
+                                 # file, which a timestamp would not: unique is not the problem,
+                                 # unidentifiable is.
+                                 f"{_slug(name or region_tag or 'embedding')}"
+                                 f"_{'-'.join(chosen)}_{start}_{end}_vectors")
             info: Dict[str, Any] = {"models_saved": pkg.get("models"),
                                     "pooled_vectors": True,
                                     "grids_saved": pkg.get("grids_saved") or []}

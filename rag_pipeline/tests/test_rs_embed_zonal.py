@@ -1227,3 +1227,23 @@ def test_the_list_parameters_accept_a_scalar_in_their_schema():
                         ("align_embedding_colors", "names")):
         ann = str(inspect.signature(by_name[tool].func).parameters[param].annotation)
         assert "str" in ann and "List" in ann, f"{tool}.{param} still refuses a bare string: {ann}"
+
+
+def test_a_traceback_keeps_the_frame_that_names_the_error():
+    """The row clamps at 140 in the transcript and expands on click, so the cap in the emitter
+
+    decides what there is to expand INTO. At 140 a traceback lost its last frame — the only part
+    worth reading — and the expand revealed a message that was already truncated.
+    """
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    tb = ("Traceback (most recent call last):\n"
+          '  File "/work/script.py", line 16, in <module>\n'
+          "    labels = kmeans.fit_predict(pixels)\n"
+          + "  ...intermediate frame...\n" * 8
+          + "ValueError: Found array with dim 3. KMeans expected <= 2.")
+    out = _outcome(_json.dumps({"ok": False, "error": tb}))
+    assert "ValueError: Found array with dim 3" in out, "the error itself must survive the cap"
+    assert len(out) > 140, "and there must be more than the clamp shows, or expanding is pointless"

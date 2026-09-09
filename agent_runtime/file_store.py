@@ -322,7 +322,10 @@ def resolve_file_ref(ref: str, *, suffix: Optional[str] = None
         return resolve_file_id(text), require_file_record(text), []
     except Exception:  # noqa: BLE001 - not an id, so try it as a name
         pass
-    matches = find_files(name=text, suffix=suffix)
+    # A high limit on purpose: the CALLER reports how many matched, and find_files' default page
+    # size of 20 made that count the page size rather than the truth — "20 saved packages match"
+    # where 32 did. The caller still shows only a handful.
+    matches = find_files(name=text, suffix=suffix, limit=500)
     if not matches:
         raise ValueError(f"no stored file matches {text!r}")
     first = matches[0]

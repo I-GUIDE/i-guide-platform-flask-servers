@@ -127,7 +127,10 @@ def _outcome(output: Any) -> Optional[str]:
             reason = "timed out"
         if not reason and body.get("exit_code") not in (None, 0):
             reason = f"exit code {body['exit_code']}"
-        return f"failed — {_short_text(reason or 'failed', limit=140)}"
+        # 600, not 140: the row CLAMPS at 140 in the transcript and expands on click, so the
+        # cap here decides what there is to expand INTO. At 140 a python traceback lost the
+        # last frame — the one naming the error — which is the only part worth reading.
+        return f"failed — {_short_text(reason or 'failed', limit=600)}"
 
     # `count` is what every search tool's _build_payload already reports.
     for key in ("count", "feature_count", "zones_with_pixels", "row_count"):
@@ -398,7 +401,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
                 {"kind": "tool_retry", "label": "Retrying", "name": tool_name,
                  "attempt": prior["attempts"] + 1,
                  "message": f"retrying {tool_name} after: "
-                            f"{_short_text(prior['error'], limit=140)}"},
+                            f"{_short_text(prior['error'], limit=600)}"},
             )
         self._emit(
             "tool_call",
@@ -457,7 +460,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
                 {"kind": "tool_recovered", "label": "Recovered", "name": tool_name,
                  "attempts": attempts,
                  "message": f"{tool_name} succeeded on attempt {attempts} — "
-                            f"the first failed with: {_short_text(prior['error'], limit=120)}"},
+                            f"the first failed with: {_short_text(prior['error'], limit=400)}"},
             )
         # Geometry-bearing results (e.g. overpass_search) also stream as an untruncated
         # `map_layer` event so a map client can plot them live; the `content` above is
