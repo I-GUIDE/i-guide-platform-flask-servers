@@ -264,3 +264,80 @@ def test_it_is_allowlisted_for_the_analysis_intent():
     assert "dem_for_region" in ANALYSIS_TOOL_NAMES
     assert "dem_for_region" in select_allowed_tools("analysis_task",
                                                     ["dem_for_region", "keyword_search"])
+
+
+# --- the frame is shaped like the box, so the server returns the box -----------------------
+#
+# Reported as "the DEM is longer than the bounding box I give". It was: a square 512x512 frame
+# over a box that is square in METRES (what a drawn region and _mercator_square both produce,
+# and never square in degrees away from the equator) makes 3DEP pad the short axis rather than
+# distort the pixels. Measured against the live service: 512x512 over a 1.307:1 box came back
+# 466 m taller at each edge; 512x392 came back within 1.2 m of the request.
+
+def test_the_frame_matches_the_box_in_degrees_not_on_the_ground():
+    """The distinction the bug turned on. This box is square in metres at 40N, which is 1.307:1
+    in degrees — so a square frame is exactly what the server refuses to honour."""
+    from agent_runtime.terrain_tools import _frame_for
+
+    box = [-88.257966, 40.076254, -88.222034, 40.103743]
+    w, h = _frame_for(box, 512)
+    assert (w, h) == (512, 392)
+    aspect_frame = w / h
+    aspect_box = (box[2] - box[0]) / (box[3] - box[1])
+    assert abs(aspect_frame - aspect_box) / aspect_box < 0.01
+
+
+def test_a_box_square_in_degrees_still_gets_a_square_frame():
+    from agent_runtime.terrain_tools import _frame_for
+
+    assert _frame_for([-90.30, 38.74, -90.26, 38.78], 512) == (512, 512)
+
+
+def test_the_long_side_is_the_one_that_gets_the_full_frame():
+    """A wide box must not be sampled at 512 rows of latitude it does not have."""
+    from agent_runtime.terrain_tools import _frame_for
+
+    w, h = _frame_for([-91.5, 40.0, -87.5, 40.5], 512)
+    assert w == 512 and h < w
+    w2, h2 = _frame_for([-88.3, 38.0, -88.2, 42.0], 512)
+    assert h2 == 512 and w2 < h2
+
+
+def test_a_sliver_never_collapses_below_the_floor():
+    """round() on an extreme aspect would ask for zero pixels, and the server would answer
+    something unusable rather than an error."""
+    from agent_runtime.terrain_tools import _frame_for
+
+    w, h = _frame_for([-91.5, 40.0, -87.5, 40.0001], 512)
+    assert h >= 64 and w >= 64
+
+
+def test_the_request_carries_that_frame():
+    """The shape has to reach the query string, which is the only place it matters."""
+    import urllib.request
+
+    from agent_runtime import terrain_tools
+
+    seen = {}
+
+    class _Resp:
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _fake(req, timeout=None):
+        seen["url"] = req.full_url
+        return _Resp()
+
+    orig = urllib.request.urlopen
+    urllib.request.urlopen = _fake
+    try:
+        terrain_tools._fetch_dem([-88.257966, 40.076254, -88.222034, 40.103743], 512)
+    finally:
+        urllib.request.urlopen = orig
+    assert "size=512%2C392" in seen["url"] or "size=512,392" in seen["url"], seen["url"]

@@ -99,12 +99,35 @@ def _wgs84() -> Any:
         return None
 
 
+def _frame_for(bbox: List[float], size: int) -> tuple:
+    """``(width, height)`` in pixels whose aspect matches the box's DEGREE aspect.
+
+    This is what keeps the raster the size of the region that was asked for. 3DEP honours the
+    requested extent only when the frame's aspect matches the bbox's — in DEGREES, not on the
+    ground. Ask for a square frame over a box that is square in METRES (which is what a drawn
+    region and `_mercator_square` both give) and the server pads the short axis instead of
+    distorting the pixels: measured, a 512x512 frame over a 1.307:1 box came back 466 m taller
+    at each edge, while a 512x392 frame came back within 1.2 m of the request.
+
+    The cost is pixels that are not square ON THE GROUND — at 40N one is ~1.3x taller in metres
+    than it is wide. That is the normal shape of any EPSG:4326 raster, and every consumer here
+    already reads the two spacings separately from the transform rather than assuming one.
+    """
+    dlon = abs(bbox[2] - bbox[0]) or 1.0
+    dlat = abs(bbox[3] - bbox[1]) or 1.0
+    long_side = max(_MIN_SIZE, min(int(size or _DEFAULT_SIZE), _MAX_SIZE))
+    if dlon >= dlat:
+        return long_side, max(_MIN_SIZE, min(_MAX_SIZE, round(long_side * dlat / dlon)))
+    return max(_MIN_SIZE, min(_MAX_SIZE, round(long_side * dlon / dlat))), long_side
+
+
 def _fetch_dem(bbox: List[float], size: int) -> Any:
     """The GeoTIFF bytes for *bbox*, or an error dict."""
+    frame_w, frame_h = _frame_for(bbox, size)
     query = {
         "bbox": ",".join(str(v) for v in bbox),
         "bboxSR": 4326, "imageSR": 4326,
-        "size": f"{size},{size}",
+        "size": f"{frame_w},{frame_h}",
         "format": "tiff", "pixelType": "F32", "noData": _NODATA,
         "interpolation": "RSP_BilinearInterpolation",
         # f=image returns the raster itself; f=json returns a URL to fetch it from, which is a
