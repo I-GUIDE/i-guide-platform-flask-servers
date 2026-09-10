@@ -274,6 +274,11 @@ export async function streamChat(
   // with four it is a guess. A name is deleted on its result, so a tool called twice in one
   // batch collapses to one entry — which under-reports rather than mislabels.
   const pending = new Set<string>();
+  // How many calls the widest point of the current batch held. Naming only while calls are
+  // still outstanding left the LAST result of a batch bare — three rows named and one not,
+  // which reads as an oversight and makes the reader infer the odd one out. A batch is named
+  // in full or not at all, and the counter resets when the batch drains.
+  let batchWidth = 0;
   const state: StreamResult = { answer: '', response: null, downloads: [], threadId: opts.threadId, memoryId: opts.memoryId ?? undefined };
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
@@ -316,6 +321,7 @@ export async function streamChat(
         const name = p.name || p.tool_calls?.[0]?.name || 'tool';
         const args = p.args !== undefined ? p.args : p.tool_calls?.[0]?.args;
         pending.add(name);
+        batchWidth = Math.max(batchWidth, pending.size);
         h.onToolCall?.(name, parseMaybeJson(args) ?? args ?? {});
         break;
       }
@@ -329,10 +335,14 @@ export async function streamChat(
         // The result row is indented under the call above it, which silently assumes the two
         // are adjacent. They are not when the model batches: one measured turn fired
         // keyword/semantic/spatial/opengeodata search and THEN printed four result rows, so
-        // "2 results" could have belonged to any of them. Name the tool whenever more than
-        // one call is still outstanding, and stay quiet when the pairing is unambiguous.
+        // "2 results" could have belonged to any of them — and measured live, the results
+        // come back OUT of call order, so the indent was not merely unproven but wrong. Name
+        // the tool for every result in a batch; stay quiet when there was only one call and
+        // the row above it is unambiguous.
         pending.delete(name);
-        const bits = [pending.size > 0 ? `${name}: ${p.outcome ?? 'done'}` : p.outcome,
+        const batched = batchWidth > 1;
+        if (pending.size === 0) batchWidth = 0;
+        const bits = [batched ? `${name}: ${p.outcome ?? 'done'}` : p.outcome,
                       typeof p.duration_s === 'number' ? `${p.duration_s}s` : null]
           .filter(Boolean);
         if (bits.length) h.onTrace?.({ text: bits.join(' · '), kind: 'result' });
