@@ -4303,7 +4303,14 @@ def build_supervisor_graph(
             # told to answer from. Without them a correct cross-turn answer ("the gse run used
             # 64 dims at 7.645 m/px", read off turn 2's ledger) is audited against this turn's
             # execution only and flagged as unsupported.
+            # This turn's rows, rendered by the SAME function that renders earlier turns.
+            # _record_actions extracts these again on the way out (line ~4405) rather than
+            # taking them from here: extraction is a pure walk over dicts already in memory,
+            # and threading a value through the recording path to save it would couple the
+            # audit to the ledger write for no measurable gain.
+            _turn_rows = [*_ledger_rows(ar, cr), *(state.get("action_rows") or [])]
             exec_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts,
+                        "this_turn": _ledger_lines(_turn_rows),
                         "prior_actions": _ledger_text, "environment": _map_env}
             # Audit only when there's actual retrieval/execution grounding to check against.
             # A purely conversational answer (composed from chat_history with no evidence or
