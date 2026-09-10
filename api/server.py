@@ -55,6 +55,19 @@ def _demo_mode() -> bool:
     return str(os.getenv("DEMO_MODE") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Which model answers in demo mode. Configurable, but with a real default rather than falling
+# through to OPENAI_CHAT_MODEL: a demo is handed to an audience, and "whatever this deployment
+# happens to be set to" is not a demo decision.
+DEMO_MODEL_DEFAULT = "gpt-5.6-luna"
+DEMO_PROVIDER_DEFAULT = "openai"
+
+
+def _demo_model() -> tuple:
+    """(provider, model) for demo mode, from DEMO_MODEL / DEMO_MODEL_PROVIDER."""
+    return (str(os.getenv("DEMO_MODEL_PROVIDER") or DEMO_PROVIDER_DEFAULT).strip(),
+            str(os.getenv("DEMO_MODEL") or DEMO_MODEL_DEFAULT).strip())
+
+
 def _get_agent_chat_api_key() -> str:
     return str(os.getenv("AGENT_CHAT_API_KEY") or "").strip()
 
@@ -173,8 +186,15 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "code_peer_model": (str(code_peer_model).strip() or None) if code_peer_model else None,
         "unified_peer": (str(unified_peer).strip().lower() in {"1", "true", "yes", "on"}
                          if unified_peer is not None else None),
-        "llm_provider": (str(llm_provider).strip() or None) if llm_provider else None,
-        "llm_model": (str(llm_model).strip() or None) if llm_model else None,
+        # FORCED in demo mode, not merely defaulted. The control that would let anyone change
+        # the model is the settings panel, and demo mode hides it — so a value left in a
+        # returning visitor's localStorage would pin them to a model they can neither see nor
+        # change. That is the same trap the spatial-tools toggle had. It also bounds what an
+        # unauthenticated endpoint can be made to spend.
+        "llm_provider": _demo_model()[0] if _demo_mode() else (
+            (str(llm_provider).strip() or None) if llm_provider else None),
+        "llm_model": _demo_model()[1] if _demo_mode() else (
+            (str(llm_model).strip() or None) if llm_model else None),
         "reasoning_effort": (str(reasoning_effort).strip() or None) if reasoning_effort else None,
     }
 

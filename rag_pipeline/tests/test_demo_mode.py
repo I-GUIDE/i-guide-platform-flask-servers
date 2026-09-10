@@ -221,3 +221,60 @@ def test_the_session_survives_the_worker_thread():
 
     assert seen == ["sess-worker"], "the worker must see the request's session"
     assert plain == [None], "and without copy_context it does not — this is the bug"
+
+
+# --- the model a demo answers with --------------------------------------------------------
+#
+# Demo mode hides the settings panel, which is the only control over the model. So the choice
+# has to be made server-side, and it has to WIN: a value left in a returning visitor's
+# localStorage would otherwise pin them to a model they can neither see nor change.
+
+def _extract(monkeypatch, body, demo):
+    monkeypatch.setenv("DEMO_MODE", "true" if demo else "false")
+    import importlib
+
+    import api.server as srv
+    importlib.reload(srv)
+    with srv.app.test_request_context(json={"userQuery": "hi", **body}):
+        return srv._normalize_agent_chat_request(srv.request.get_json())
+
+
+def test_demo_mode_answers_with_luna(monkeypatch):
+    got = _extract(monkeypatch, {}, demo=True)
+    assert got["llm_model"] == "gpt-5.6-luna"
+    assert got["llm_provider"] == "openai"
+
+
+def test_demo_mode_overrides_a_model_the_client_still_sends(monkeypatch):
+    """The client cannot show the picker in demo mode, so a stored value is stale by
+    definition — honouring it hands a visitor a model with no way to change it."""
+    got = _extract(monkeypatch, {"model": "gpt-4o-2024-11-20", "provider": "openai"}, demo=True)
+    assert got["llm_model"] == "gpt-5.6-luna"
+
+
+def test_outside_demo_mode_the_request_still_chooses(monkeypatch):
+    got = _extract(monkeypatch, {"model": "claude-sonnet-5", "provider": "anthropic"}, demo=False)
+    assert got["llm_model"] == "claude-sonnet-5"
+    assert got["llm_provider"] == "anthropic"
+
+
+def test_outside_demo_mode_silence_still_means_the_configured_default(monkeypatch):
+    got = _extract(monkeypatch, {}, demo=False)
+    assert got["llm_model"] is None, "None lets executor_factory resolve OPENAI_CHAT_MODEL"
+    assert got["llm_provider"] is None
+
+
+def test_the_demo_model_is_configurable(monkeypatch):
+    monkeypatch.setenv("DEMO_MODEL", "gpt-5.6-sol")
+    monkeypatch.setenv("DEMO_MODEL_PROVIDER", "openai")
+    got = _extract(monkeypatch, {}, demo=True)
+    assert got["llm_model"] == "gpt-5.6-sol"
+
+
+def test_it_does_not_fall_through_to_the_deployment_default(monkeypatch):
+    """A demo is handed to an audience; "whatever OPENAI_CHAT_MODEL happens to be" is not a
+    demo decision, so the fallback is a named constant rather than that env var."""
+    monkeypatch.delenv("DEMO_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_CHAT_MODEL", "gpt-4o-2024-11-20")
+    got = _extract(monkeypatch, {}, demo=True)
+    assert got["llm_model"] == "gpt-5.6-luna"

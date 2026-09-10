@@ -128,7 +128,14 @@ const RS_SUGGESTIONS = [
   'Which satellite embedding models can I use?',
   'Embed Urbana, Illinois with the GSE model',
   'What can you do with satellite embeddings?',
-  'Compare Champaign and Urbana on a shared PCA basis',
+  // Was "Compare Champaign and Urbana on a shared PCA basis" — the heaviest thing on the page
+  // sitting where the lightest ought to be. It embedded two WHOLE cities (~30 km² each, tens of
+  // thousands of tiles) before it could align anything, so the one starter a visitor is most
+  // likely to click ran for minutes and spent imagery quota on the deployment's credential.
+  // A 1 km box each keeps the point of it — one shared basis is what makes two regions
+  // comparable by colour at all — at roughly a thirtieth of the ground, and names GSE, which
+  // is precomputed and returns in seconds rather than being computed on the fly.
+  'Compare 1 km boxes in Champaign and Urbana with GSE on a shared colour basis',
 ];
 
 interface Props {
