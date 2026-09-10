@@ -271,12 +271,24 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .art img { display: block; width: 100%; height: auto; }
 .art figcaption { padding: 7px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); }
 .art figcaption .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
-.files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.files a { display: inline-flex; align-items: center; gap: 7px; background: #eef6f0; border: 1px solid #d6e7db; color: var(--link); text-decoration: none; border-radius: 10px; padding: 7px 12px; font-size: 13px; }
-.files a:hover { background: #e4f0e8; }
-/* Underscore-joined filenames and long inline code have no break opportunity, so they punch out
-   of the pane and get clipped. Only routine now that the pane can be narrowed. */
-.files a { overflow-wrap: anywhere; }
+/* Downloads: a named section, ruled off from the answer.
+   The pills it replaces sat flush against the last paragraph and read as part of the prose —
+   and truncating the names to keep them pill-sized is what made four different artifacts
+   indistinguishable. A row each, the full name, and a divider that says where the answer ends. */
+.dl { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+      display: flex; flex-direction: column; gap: 6px; }
+.dl-head { font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
+           color: var(--muted); font-weight: 600; }
+.dl-item { display: flex; align-items: center; gap: 9px; background: #eef6f0;
+           border: 1px solid #d6e7db; color: var(--link); text-decoration: none;
+           border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+.dl-item:hover { background: #e4f0e8; }
+/* Underscore-joined filenames have no break opportunity, so they punch out of the pane and get
+   clipped. Shown in FULL on purpose — the name is how one artifact is told from another — so
+   it wraps rather than being cut. */
+.dl-name { overflow-wrap: anywhere; min-width: 0; }
+.dl-ico { flex: none; color: var(--brand); }
+.dl-ext { font-size: 6.2px; font-weight: 700; fill: currentColor; letter-spacing: .04em; }
 .md code { overflow-wrap: anywhere; }
 
 /* map-layer pills */

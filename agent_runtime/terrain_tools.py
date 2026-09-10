@@ -151,6 +151,18 @@ def _fetch_dem(bbox: List[float], size: int) -> Any:
     return body
 
 
+def _file_ref(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """A file the answer can offer: id, url AND NAME.
+
+    The name is not decoration. The client harvests file records out of any tool result and
+    falls back to the literal string "download" when `filename` is absent — so a download list
+    read "download · download · download" while every one of these dicts knew its real name and
+    simply did not send it.
+    """
+    return {"file_id": rec["file_id"], "filename": rec.get("filename"),
+            "download_url": rec.get("download_url")}
+
+
 def _stats(values: Any) -> Dict[str, Any]:
     import numpy as np
 
@@ -450,8 +462,8 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
             "ground_resolution_m": _pixel_size_m(transform, served),
             "units": "metres above sea level",
             "clipped_to_shape": bool(clip_to_shape and file_id),
-            "geotiff": {"file_id": tif_rec["file_id"], "download_url": tif_rec.get("download_url")},
-            "image": {"file_id": png_rec["file_id"], "download_url": png_rec.get("download_url")},
+            "geotiff": _file_ref(tif_rec),
+            "image": _file_ref(png_rec),
             "on_map": True,
             "map_layer": layer,
             "note": "Colours are a relief ramp stretched between THIS region's own min and max, "
@@ -616,7 +628,7 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 "zones_partially_covered": int(partial),
                 "columns_added": cols,
                 "zone_id_field": zone_id_field,
-                "geojson": {"file_id": rec["file_id"], "download_url": rec.get("download_url")},
+                "geojson": _file_ref(rec),
                 "raster_bounds": [round(b, 6) for b in bounds],
                 "on_map": True,
                 "map_layer": {
@@ -743,10 +755,8 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 "ok": True, "kind": kind, "region_bbox": [round(float(b), 6) for b in box],
                 "units": unit,
                 "ground_resolution_m": round(max(dx_m, dy_m), 2),
-                "geotiff": {"file_id": tif_rec["file_id"],
-                            "download_url": tif_rec.get("download_url")},
-                "image": {"file_id": png_rec["file_id"],
-                          "download_url": png_rec.get("download_url")},
+                "geotiff": _file_ref(tif_rec),
+                "image": _file_ref(png_rec),
                 "on_map": True, "map_layer": layer,
             }
             if finite.size:
@@ -860,10 +870,8 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 "flooded_fraction": round(wet_km2 / land_km2, 4) if land_km2 else 0.0,
                 "mean_depth_m": (round(float(wet_depths.mean()), 2) if wet_depths.size else 0.0),
                 "max_depth_m": (round(float(wet_depths.max()), 2) if wet_depths.size else 0.0),
-                "depth_geotiff": {"file_id": tif_rec["file_id"],
-                                  "download_url": tif_rec.get("download_url")},
-                "image": {"file_id": png_rec["file_id"],
-                          "download_url": png_rec.get("download_url")},
+                "depth_geotiff": _file_ref(tif_rec),
+                "image": _file_ref(png_rec),
                 "on_map": True, "map_layer": layer,
                 "note": "A bathtub fill: ground at or below the level, with no account of where "
                         "water comes from, whether it could reach a hollow, or of drainage and "

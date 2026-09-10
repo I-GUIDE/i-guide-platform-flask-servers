@@ -289,6 +289,40 @@ function TraceRow({ row }: { row: Row }) {
   );
 }
 
+/** The name to show for a download — never the placeholder.
+ *
+ * `collectDownloads` fills `filename` with the literal string "download" when a tool result
+ * carried a url and an id but no name, and several tools did exactly that — so a list of four
+ * artifacts read "download · download · download · download". The tools now send their names;
+ * this is the fallback for anything that still does not, and an id is at least unique and
+ * traceable where a repeated word is neither. */
+function displayName(f: FileRecord): string {
+  const n = (f.filename || '').trim();
+  if (n && n.toLowerCase() !== 'download') return n;
+  return f.file_id ? `unnamed file (${f.file_id})` : 'unnamed file';
+}
+
+/** Extension-aware file glyph. Inline SVG rather than an emoji or an icon font: it inherits
+ *  currentColor, so it stays legible in both themes without a second asset to load. */
+function FileIcon({ name }: { name: string }) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const tag = ({ tif: 'TIF', tiff: 'TIF', png: 'PNG', jpg: 'JPG', jpeg: 'JPG', csv: 'CSV',
+                 geojson: 'GEO', json: 'JSON', npz: 'NPZ', zip: 'ZIP', pdf: 'PDF',
+                 txt: 'TXT', md: 'MD', html: 'HTM' } as Record<string, string>)[ext] || '';
+  return (
+    <svg className="dl-ico" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
+         focusable="false">
+      {/* A page with its corner turned. Two paths so the fold reads at 18px, where a single
+          outline with a diagonal notch turns to mush. */}
+      <path d="M14 2.5H7A1.5 1.5 0 0 0 5.5 4v16A1.5 1.5 0 0 0 7 21.5h10a1.5 1.5 0 0 0 1.5-1.5V7z"
+            fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M14 2.5V7h4.5" fill="none" stroke="currentColor" strokeWidth="1.4"
+            strokeLinejoin="round" />
+      {tag && <text x="12" y="17.4" textAnchor="middle" className="dl-ext">{tag}</text>}
+    </svg>
+  );
+}
+
 function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) => string }) {
   const imgs = (m.artifacts || []).filter(isImg).filter((f) => !(m.html || '').includes(f.file_id));
   const files = (m.artifacts || []).filter((f) => !isImg(f));
@@ -321,7 +355,18 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
               ))}
             </div>
           )}
-          {files.length > 0 && <div className="files">{files.map((f) => <a key={f.file_id} href={resolveUrl(f.download_url)} target="_blank" rel="noopener noreferrer">{f.filename}</a>)}</div>}
+          {files.length > 0 && (
+            <div className="dl">
+              <div className="dl-head">{files.length === 1 ? 'Download' : 'Downloads'}</div>
+              {files.map((f) => (
+                <a className="dl-item" key={f.file_id} href={resolveUrl(f.download_url)}
+                   target="_blank" rel="noopener noreferrer" title={displayName(f)}>
+                  <FileIcon name={displayName(f)} />
+                  <span className="dl-name">{displayName(f)}</span>
+                </a>
+              ))}
+            </div>
+          )}
           {m.response && <Sources response={m.response} />}
         </div>
       )}
