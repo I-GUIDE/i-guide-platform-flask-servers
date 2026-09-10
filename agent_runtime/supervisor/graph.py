@@ -2950,6 +2950,32 @@ _RETRIEVAL_TOOLS = frozenset({
 })
 
 
+def _decision_sentence(nxt: str, why: str) -> Optional[str]:
+    """A sentence for a supervisor decision a reader would otherwise misread, or None.
+
+    None for the ordinary case — the decider simply chose, and saying "(decision)" adds a row
+    without adding a fact. Everything else here is the loop declining to do the obvious thing,
+    which is exactly when a reader needs to be told why rather than left to guess.
+    """
+    if why == "decision":
+        return None
+    if why == "max_steps":
+        return "Stopping: this turn reached its step limit"
+    if why == "search exhausted":
+        return "Stopping: the knowledge base has nothing further to give"
+    if why == "nothing has run yet":
+        return f"Starting with {nxt}: nothing has run yet this turn"
+    if why.startswith("no-progress repeat"):
+        # The repeating action is named INSIDE the parens, and by this point `nxt` has already
+        # been overwritten with "done" — reading it here says "done would repeat", which is
+        # both wrong and confusing about what the loop declined to do.
+        repeated = why.partition("(")[2].rstrip(")").strip() or "that step"
+        return f"Stopping: {repeated} would repeat with nothing new to work from"
+    if why.startswith("request by "):
+        return f"Running {nxt}, asked for by {why[len('request by '):]}"
+    return f"{nxt}: {why}"
+
+
 def unified_peer_enabled(state: Optional[Dict[str, Any]] = None) -> bool:
     """Whether search and analyze run as ONE agent. Off by default.
 
@@ -3999,11 +4025,25 @@ def build_supervisor_graph(
                 and state.get("analysis_results") is None
                 and state.get("code_result") is None):
             nxt, why = "analyze", "nothing has run yet"
+        # `supervisor -> analyze (decision)` — an arrow, two internal node names, and a
+        # parenthetical whose commonest value means "no special reason". But the OTHER five
+        # values of `why` are the most informative thing in the whole trace: they say why the
+        # loop did something a reader would otherwise call a bug (stopped early, stopped
+        # without searching, ran analysis on a request that named no analysis). Those get a
+        # sentence AND their own event, so folding the routing ladder cannot hide them.
         emit_trace_event(
             "node_completed",
-            {"stage": "supervisor", "route": nxt, "message": f"supervisor → {nxt} ({why})"},
+            {"stage": "supervisor", "route": nxt, "message": f"Next: {nxt}"},
             node="supervisor",
         )
+        _reason = _decision_sentence(nxt, why)
+        if _reason:
+            emit_trace_event(
+                "decision",
+                {"kind": "supervisor_decision", "route": nxt, "why": why,
+                 "message": _reason},
+                node="supervisor",
+            )
         return {
             "next_action": nxt,
             "actions": [*(state.get("actions") or []), nxt],

@@ -1900,6 +1900,11 @@ def agent_chat_stream():
           - `error`: streamed error payload. Missing `userQuery` is reported this way after the stream is opened.
 
           Additional UI events:
+          - `node`: graph node lifecycle (`node_started` / `node_completed`) with a
+            human-readable `message`. This carries MOST of the progress text a user reads —
+            triage, the supervisor's next step, each peer starting and finishing. A client
+            that has no branch for it drops that text into whatever its default branch does,
+            which is how one client rendered nine rows of routing bookkeeping per turn.
           - `routing`: route initialization, intent/policy state, and final route trace.
           - `search`: search-agent starts, completions, tool calls, tool results, and tool errors.
           - `analysis`: analysis/code-agent starts, completions, tool calls, tool results, and tool errors.
@@ -1914,6 +1919,12 @@ def agent_chat_stream():
 
             event: routing
             data: {"type":"initialized","detail":{"stage":"initialized","thread_id":"demo-thread-1","tool_strategy":"granular","available_agents":["answer_from_memory","search_agent_evidence","analysis_agent_answer"],"available_skills":[]}}
+
+            event: node
+            data: {"type":"node_started","stage":"triage","node":"triage","agent":"","message":"Routing the request","detail":{"stage":"triage","message":"Routing the request"}}
+
+            event: node
+            data: {"type":"node_completed","stage":"supervisor","node":"supervisor","agent":"","message":"Next: analyze","detail":{"stage":"supervisor","route":"analyze","message":"Next: analyze"}}
 
             event: agent_trace
             data: {"type":"route_decision","agent":"orchestrator_agent","label":"Route decision","message":"route=search_then_analysis; intent=search","detail":{"kind":"agent_route_decision","route":"search_then_analysis"}}
@@ -2138,7 +2149,7 @@ def agent_chat_stream():
                         continue
 
                     if event_name == "memory_saved":
-                        yield _sse_event("status", {"status": "Updating memory..."})
+                        yield _sse_event("status", {"status": "Updating memory"})
                         continue
 
                     if event_name == "warning":

@@ -269,6 +269,11 @@ export async function streamChat(
   if (!resp.ok || !resp.body) throw new Error(await describeError(resp));
 
   const downloads = new Map<string, FileRecord>();
+  // Tool calls whose result has not arrived. Only used to decide whether a result row has to
+  // name its tool: with one call outstanding the indent under the call above is unambiguous,
+  // with four it is a guess. A name is deleted on its result, so a tool called twice in one
+  // batch collapses to one entry — which under-reports rather than mislabels.
+  const pending = new Set<string>();
   const state: StreamResult = { answer: '', response: null, downloads: [], threadId: opts.threadId, memoryId: opts.memoryId ?? undefined };
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
@@ -310,6 +315,7 @@ export async function streamChat(
       case 'tool_call': {
         const name = p.name || p.tool_calls?.[0]?.name || 'tool';
         const args = p.args !== undefined ? p.args : p.tool_calls?.[0]?.args;
+        pending.add(name);
         h.onToolCall?.(name, parseMaybeJson(args) ?? args ?? {});
         break;
       }
@@ -319,7 +325,15 @@ export async function streamChat(
         // The trace used to show that a tool was CALLED and never what came back, so a search
         // finding eight documents, one finding none, and one that failed all rendered
         // identically. The server now sends a headline and a duration; this is the line.
-        const bits = [p.outcome, typeof p.duration_s === 'number' ? `${p.duration_s}s` : null]
+        //
+        // The result row is indented under the call above it, which silently assumes the two
+        // are adjacent. They are not when the model batches: one measured turn fired
+        // keyword/semantic/spatial/opengeodata search and THEN printed four result rows, so
+        // "2 results" could have belonged to any of them. Name the tool whenever more than
+        // one call is still outstanding, and stay quiet when the pairing is unambiguous.
+        pending.delete(name);
+        const bits = [pending.size > 0 ? `${name}: ${p.outcome ?? 'done'}` : p.outcome,
+                      typeof p.duration_s === 'number' ? `${p.duration_s}s` : null]
           .filter(Boolean);
         if (bits.length) h.onTrace?.({ text: bits.join(' · '), kind: 'result' });
         h.onToolResult?.(name, parseMaybeJson(rawContent), rawContent);
@@ -351,6 +365,14 @@ export async function streamChat(
         break;
       case 'llm_error':
         if (p.message) h.onTrace?.({ text: String(p.message), kind: 'warn' });
+        break;
+      // The peer's report to the supervisor, up to 4000 chars of raw markdown with URLs in
+      // it — and the synthesised answer directly below the trace says the same thing. It was
+      // the single largest row in every turn and the only one that duplicated the answer.
+      // Dropped from the RENDER, not from the wire: it is still the only place to see what a
+      // peer concluded before synthesis rewrote it, so other clients and anyone debugging
+      // the stream keep it.
+      case 'llm_message':
         break;
       case 'answer': {
         const t = p.final_answer || p.answer || p.detail?.final_answer || p.detail?.answer;
@@ -403,6 +425,13 @@ export async function streamChat(
       // also where the peer's raw prose lands. Indistinguishable rows cannot be folded, which
       // is why nine of the fifteen rows in a one-tool turn were the framework announcing
       // itself. Tagging them is what lets the transcript collapse the ladder.
+      // Why the loop did something a reader would otherwise call a bug — stopped early,
+      // stopped without searching, ran analysis on a request that named none. Its own kind
+      // so the routing fold cannot swallow it.
+      case 'decision': {
+        if (p.message) h.onTrace?.({ text: String(p.message), kind: 'decision' });
+        break;
+      }
       case 'node': {
         const msg = p.message || p.detail?.message;
         if (msg) h.onTrace?.({ text: String(msg), kind: 'node' });

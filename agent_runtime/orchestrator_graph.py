@@ -145,9 +145,18 @@ def build_orchestrator_graph(
             {"stage": "triage", "message": "Routing the request"},
             node="triage",
         )
+        # `fast` / `capabilities` / `orchestrate` are node names in THIS graph. "Routed to
+        # orchestrate" told the reader which node was next, which is not a fact about their
+        # request — and for the other two it also duplicated the destination's own first line.
+        _ROUTE_NAMES = {
+            "orchestrate": "Routed to the full agent",
+            "fast": "Routed to a direct answer",
+            "capabilities": "Routed to the capability summary",
+        }
         emit_trace_event(
             "node_completed",
-            {"stage": "triage", "route": route, "message": f"Routed to {route}"},
+            {"stage": "triage", "route": route,
+             "message": _ROUTE_NAMES.get(route, f"Routed to {route}")},
             node="triage",
         )
         return {"route": route}
