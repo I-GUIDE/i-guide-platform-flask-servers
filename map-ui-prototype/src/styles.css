@@ -211,18 +211,33 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .reason .body .ln.clampable.open::after { content: "⌃"; }
 .reason .body .ln.clampable.open { white-space: pre-wrap; }
 .reason .body .ln.result { color: #6b7280; padding-left: 14px; }
-.reason .body .ln.result::before { content: "\2190 "; color: #9aa0a6; }
+.reason .body .ln.result::before { content: "← "; color: #9aa0a6; }
 /* A tool that failed and then worked. Green rather than red: the turn recovered, and colouring
    it as an error would train the reader to ignore the reds that matter. It still has to APPEAR —
    a turn that quietly needed two attempts is a turn whose tool contract is wrong, and one retry
    sits below the dead-end detector's threshold of two, so nothing else reports it. */
 .reason .body .ln.recovered { color: #1f7a4d; }
-.reason .body .ln.recovered::before { content: "\21ba "; color: #1f7a4d; }
+.reason .body .ln.recovered::before { content: "↺ "; color: #1f7a4d; }
 .reason .body .ln.warn { color: #a4453a; }
 .reason .body .ln.warn::before { content: "! "; color: #a4453a; }
 .reason .body .ln.routing, .reason .body .ln.route { color: #3b4046; font-weight: 600; }
 .reason .body .ln.routing::before, .reason .body .ln.route::before { content: "⇢ "; color: var(--brand); }
 .reason .body .ln.search, .reason .body .ln.analysis, .reason .body .ln.status { color: #6b6478; }
+/* The graph narrating its own traversal. Same weight as .routing — it IS routing — but the run
+   collapses to one row, so what shows is a heading for a phase rather than a list of hops. */
+.reason .body .ln.node { color: #3b4046; font-weight: 600; }
+.reason .body .ln.node::before { content: "⇢ "; color: var(--brand); }
+/* How many rows are folded under this one. Stated on the row rather than left to the chevron:
+   "+4" says there is something specific behind the click, which "⌄" alone does not. */
+.reason .body .ln .more {
+  margin-left: 6px; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  color: var(--brand); background: rgba(26, 163, 122, .12);
+  padding: 0 5px; border-radius: 8px; vertical-align: 1px;
+}
+/* A folded row, once shown. Indented and unemphasised: it is the detail behind a heading the
+   reader has already read, not a peer of it. No marker of its own — the indent carries it. */
+.reason .body .ln.sub { padding-left: 16px; font-weight: 400; color: #7b8189; }
+.reason .body .ln.sub::before { content: ""; }
 
 /* answer card */
 .answer-card { border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: var(--shadow); padding: 6px 18px 14px; }

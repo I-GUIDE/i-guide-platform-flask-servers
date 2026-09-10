@@ -527,7 +527,8 @@ export default function App() {
           addTrace({ text: `map: ${layer.render || 'layer'} — ${layer.label} `
             + (layer.sampled && layer.total
                 ? `(SAMPLE: ${layer.count ?? fc.features.length} of ${layer.total})`
-                : `(${layer.count ?? fc.features.length} features)`), kind: 'tool' });
+                : (() => { const n = layer.count ?? fc.features.length;
+                            return `(${n} feature${n === 1 ? '' : 's'})`; })()), kind: 'tool' });
         },
         onIds: ({ threadId, memoryId }) => { if (threadId) threadRef.current = threadId; if (memoryId) memoryRef.current = memoryId; },
       });

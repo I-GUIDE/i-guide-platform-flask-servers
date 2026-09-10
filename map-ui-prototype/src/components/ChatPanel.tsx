@@ -192,23 +192,44 @@ function Sources({ response }: { response: any }) {
   );
 }
 
+/** One rendered row: a line, plus any lines folded underneath it. */
+type Row = { line: TraceLine; folded?: TraceLine[] };
+
 /** What the transcript SHOWS, folded from what it stored.
  *
- * A ReAct round emits an "asking the model" line before every tool call, so the ladder of them
- * was the most frequent line in the trace and the least informative — eight identical rows
- * naming the same model, between the rows that said what actually happened. Only the first
- * survives here: it names the model, which is worth stating once and nothing after that.
+ * Two ladders, both of which used to print in full. A ReAct round emits an "asking the model"
+ * line before every tool call — eight identical rows naming the same model, between the rows
+ * that said what actually happened; only the first survives, because the model is worth
+ * stating once. And the graph narrates its own traversal: measured on a one-tool turn, nine of
+ * fifteen rows were routing bookkeeping ("Routing the request", "Routed to orchestrate",
+ * "Orchestrator agent started", "supervisor -> analyze (decision)", "Running analysis
+ * workflow"), five to start and four to stop, against three rows that carried information.
+ * A consecutive run of those collapses to its first line with the rest one click away.
+ *
+ * The first line, not the last, because a run opens by saying what is beginning — the last
+ * line of the closing run is "Supervisor graph completed", which is the least useful string
+ * in the set.
  *
  * Folded at RENDER, not at ingest. The array keeps every event, so the stored transcript stays
  * complete and a later reader is not looking at an edited record. */
-function foldTrace(trace: TraceLine[]): TraceLine[] {
+export function foldTrace(trace: TraceLine[]): Row[] {
   let seenModelLine = false;
-  return trace.filter((t) => {
+  const kept = trace.filter((t) => {
     if (t.kind !== 'llm') return true;
     if (seenModelLine) return false;
     seenModelLine = true;
     return true;
   });
+  const rows: Row[] = [];
+  for (const line of kept) {
+    const prev = rows[rows.length - 1];
+    if (line.kind === 'node' && prev && prev.line.kind === 'node') {
+      (prev.folded ||= []).push(line);
+    } else {
+      rows.push({ line });
+    }
+  }
+  return rows;
 }
 
 // How much of a trace line shows before it is clamped. A traceback or a tool's argument dict
@@ -216,22 +237,36 @@ function foldTrace(trace: TraceLine[]): TraceLine[] {
 // — but the interesting half of a stack trace is the part that got cut. Clamped, clickable.
 const TRACE_CLAMP = 140;
 
-function TraceRow({ line }: { line: TraceLine }) {
+function TraceRow({ row }: { row: Row }) {
   const [open, setOpen] = useState(false);
+  const { line, folded } = row;
+  // Two reasons a row expands, and a row can have both: it is longer than the clamp, or it
+  // stands for a run of folded rows. Either way one click opens it.
   const long = line.text.length > TRACE_CLAMP;
+  const run = folded?.length || 0;
+  const expandable = long || run > 0;
+  const label = run > 0
+    ? (open ? 'Collapse these steps' : `Show ${run} more step${run === 1 ? '' : 's'}`)
+    : (open ? 'Collapse' : 'Show the whole message');
   return (
-    <div
-      className={`ln ${line.kind || ''}${long ? ' clampable' : ''}${open ? ' open' : ''}`}
-      onClick={long ? () => setOpen((v) => !v) : undefined}
-      role={long ? 'button' : undefined}
-      tabIndex={long ? 0 : undefined}
-      onKeyDown={long ? (e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); }
-      } : undefined}
-      title={long ? (open ? 'Collapse' : 'Show the whole message') : undefined}
-    >
-      {open || !long ? line.text : `${line.text.slice(0, TRACE_CLAMP)}…`}
-    </div>
+    <>
+      <div
+        className={`ln ${line.kind || ''}${expandable ? ' clampable' : ''}${open ? ' open' : ''}`}
+        onClick={expandable ? () => setOpen((v) => !v) : undefined}
+        role={expandable ? 'button' : undefined}
+        tabIndex={expandable ? 0 : undefined}
+        onKeyDown={expandable ? (e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); }
+        } : undefined}
+        title={expandable ? label : undefined}
+      >
+        {open || !long ? line.text : `${line.text.slice(0, TRACE_CLAMP)}…`}
+        {run > 0 && <span className="more">+{run}</span>}
+      </div>
+      {open && folded?.map((f, i) => (
+        <div className={`ln ${f.kind || ''} sub`} key={i}>{f.text}</div>
+      ))}
+    </>
   );
 }
 
@@ -247,7 +282,7 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
           {/* The tally counts what is SHOWN. Counting the stored array called a turn with seven
               tool calls "28 steps", most of them the folded model lines. */}
           <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${foldTrace(m.trace).length} steps`}</span><span className="chev">▾</span></summary>
-          <div className="body">{foldTrace(m.trace).map((t, j) => <TraceRow key={j} line={t} />)}</div>
+          <div className="body">{foldTrace(m.trace).map((r, j) => <TraceRow key={j} row={r} />)}</div>
         </details>
       )}
       {(hasBody || imgs.length > 0 || m.response) && (

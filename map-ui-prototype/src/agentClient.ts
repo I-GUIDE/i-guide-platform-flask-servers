@@ -329,7 +329,11 @@ export async function streamChat(
       // every one of them in the stored array. Untagged they arrived via the default branch
       // and were indistinguishable from any other status line.
       case 'llm_start': {
-        const msg = p.message || p.detail?.message;
+        // The server's line is "<model> started with 12 message(s)" — a count of the CONTEXT
+        // window's history, sitting in a column where every other number is a result count,
+        // and carrying the "(s)" hedge. The model name is the part worth stating once, and it
+        // arrives on its own field, so the line is rebuilt here rather than reworded there.
+        const msg = p.model ? `Asking ${p.model}` : (p.message || p.detail?.message);
         if (msg) h.onTrace?.({ text: String(msg), kind: 'llm' });
         break;
       }
@@ -393,8 +397,23 @@ export async function streamChat(
       case 'error':
         state.error = p.error || p.message || 'Request failed';
         break;
+      // The graph's own progress: "Routing the request", "Running analysis workflow",
+      // "supervisor -> analyze (decision)", "Composing answer". There was no case for it, so
+      // every one of these fell through to `default:` and was pushed with NO kind — which is
+      // also where the peer's raw prose lands. Indistinguishable rows cannot be folded, which
+      // is why nine of the fifteen rows in a one-tool turn were the framework announcing
+      // itself. Tagging them is what lets the transcript collapse the ladder.
+      case 'node': {
+        const msg = p.message || p.detail?.message;
+        if (msg) h.onTrace?.({ text: String(msg), kind: 'node' });
+        break;
+      }
       case 'status':
       case 'routing':
+      // Emitted (via _category_for_agent_role) but carrying tool payloads whose message sits
+      // under .detail, so these render nothing today. Kept as explicit no-ops rather than
+      // deleted: they ARE on the wire, and a future payload with a top-level message belongs
+      // here rather than in `default:`.
       case 'search':
       case 'analysis': {
         const msg = p.message || p.label || p.stage || p.route;
