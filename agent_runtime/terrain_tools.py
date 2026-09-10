@@ -149,6 +149,17 @@ def _ground_resolution_m(bbox: List[float], size: int) -> float:
     return round(max(width_m, height_m) / max(size, 1), 2)
 
 
+def _pixel_size_m(transform: Any, bbox: List[float]) -> float:
+    """Metres per pixel read off the raster's OWN transform.
+
+    Preferred over _ground_resolution_m wherever a real raster is in hand: that one divides the
+    REQUESTED box by the REQUESTED size, and 3DEP honours neither exactly.
+    """
+    mid_lat = (bbox[1] + bbox[3]) / 2.0
+    return round(max(abs(transform.a) * 111_320.0 * math.cos(math.radians(mid_lat)),
+                     abs(transform.e) * 110_540.0), 2)
+
+
 def _render(values: Any, path: Path) -> None:
     """A terrain-coloured PNG, ONE image pixel per DEM cell.
 
@@ -353,6 +364,15 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 # it — the request asked for imageSR=4326. Reading it back only creates a way
                 # for a broken PROJ install to fail a request whose answer does not need it.
                 transform = src.transform
+                # THE EXTENT 3DEP ACTUALLY RETURNED, which is not the one we asked for. Asked
+                # for a 512x512 frame over a box that is not square in degrees, the server pads
+                # the shorter axis to keep its pixels square: measured on the deployed service,
+                # a 0.0275-degree-tall request came back 0.0360 degrees tall — 466 m added at
+                # each edge. Draping that image over the REQUESTED box squeezes it by 13% and
+                # displaces every feature by up to 470 m, which is precisely the silent
+                # misregistration this module's own _render docstring warns about. Only the
+                # returned bounds describe these pixels.
+                served = [round(float(v), 6) for v in src.bounds]
         except Exception as exc:  # noqa: BLE001
             return json.dumps({"ok": False, "region_bbox": box,
                                "error": f"could not read the DEM 3DEP returned: {exc}"[:300]})
@@ -392,14 +412,19 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
         png_rec = create_output_file_from_path(png, filename=png.name)
 
         layer = _raster_layer(
-            png_rec, box, f"Elevation — {name or _region_tag(None, box)}",
-            _layer_id("dem", _region_tag(None, box), bbox=_round_bbox(box), size=px,
+            png_rec, served, f"Elevation — {name or _region_tag(None, box)}",
+            _layer_id("dem", _region_tag(None, box), bbox=_round_bbox(served), size=px,
                       clipped=bool(clip_to_shape and file_id)))
 
         out: Dict[str, Any] = {
-            "ok": True, "region_bbox": box, "source": "USGS 3DEP (no credential required)",
+            # region_bbox is what the pixels COVER, so every area and share computed from this
+            # raster agrees with the layer on the map. requested_bbox is kept beside it because
+            # the two differ, and an answer that says "the 4 km box you asked for" while the
+            # data covers something else is wrong in a way nothing downstream can catch.
+            "ok": True, "region_bbox": served, "requested_bbox": box,
+            "source": "USGS 3DEP (no credential required)",
             "grid": [int(values.shape[0]), int(values.shape[1])],
-            "ground_resolution_m": _ground_resolution_m(box, px),
+            "ground_resolution_m": _pixel_size_m(transform, served),
             "units": "metres above sea level",
             "clipped_to_shape": bool(clip_to_shape and file_id),
             "geotiff": {"file_id": tif_rec["file_id"], "download_url": tif_rec.get("download_url")},

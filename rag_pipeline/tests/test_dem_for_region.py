@@ -54,9 +54,69 @@ def _geotiff(values: np.ndarray, bbox=(-88.28, 40.06, -88.16, 40.16)) -> bytes:
         return mem.read()
 
 
-def _run(monkeypatch, values, **kw):
-    monkeypatch.setattr(terrain_tools, "_fetch_dem", lambda bbox, size: _geotiff(values))
-    return json.loads(_tool().func(bbox=[-88.28, 40.06, -88.16, 40.16], **kw))
+def _run(monkeypatch, values, served_bbox=None, **kw):
+    """*served_bbox* is the extent the fake server returns, which need not be the one asked for.
+
+    The default still matches the request, so the existing tests are unchanged; the padded case
+    is what the real 3DEP does and what the tests below pin.
+    """
+    req = (-88.28, 40.06, -88.16, 40.16)
+    monkeypatch.setattr(terrain_tools, "_fetch_dem",
+                        lambda bbox, size: _geotiff(values, served_bbox or req))
+    return json.loads(_tool().func(bbox=list(req), **kw))
+
+
+# --- the extent 3DEP serves is not the one it was asked for --------------------------------
+#
+# MEASURED on the deployed service: a 512x512 frame over a box that is not square in degrees
+# comes back with the SHORTER axis padded so the pixels stay square — a 0.0275-degree-tall
+# request returned 0.0360 degrees, 466 m added at each edge. Draping that image over the
+# requested box squeezes it 13% and displaces every feature by up to 470 m. It looked fine in a
+# screenshot over smooth farmland; the arithmetic is what caught it, when a downstream tool's
+# land area disagreed with the requested box by 30%.
+
+def test_the_layer_is_draped_over_the_ground_the_pixels_actually_cover(store, monkeypatch):
+    padded = (-88.28, 40.05, -88.16, 40.17)     # taller than requested, as the server does
+    out = _run(monkeypatch, np.full((64, 64), 220.0), served_bbox=padded)
+
+    assert out["map_layer"]["bounds"] == [round(v, 6) for v in padded]
+    assert out["region_bbox"] == [round(v, 6) for v in padded]
+
+
+def test_the_request_is_reported_beside_what_was_served(store, monkeypatch):
+    """Both, because they differ: an answer saying "the box you asked for" while the data covers
+    something else is wrong in a way nothing downstream can catch."""
+    padded = (-88.28, 40.05, -88.16, 40.17)
+    out = _run(monkeypatch, np.full((32, 32), 220.0), served_bbox=padded)
+
+    assert out["requested_bbox"] == [-88.28, 40.06, -88.16, 40.16]
+    assert out["region_bbox"] != out["requested_bbox"]
+
+
+def test_the_resolution_is_read_off_the_raster_not_off_the_request(store, monkeypatch):
+    """Dividing the requested box by the requested size is right only when the server honours
+    both. It honours neither."""
+    padded = (-88.28, 40.05, -88.16, 40.17)
+    out = _run(monkeypatch, np.full((64, 64), 220.0), served_bbox=padded)
+
+    # 0.12 deg of latitude over 64 rows at ~40N is ~207 m per pixel; the requested 0.10 deg
+    # would say ~173 m. The numbers have to come from the pixels that exist.
+    assert out["ground_resolution_m"] > 190
+
+
+def test_bounds_and_areas_agree_once_they_come_from_the_same_place(store, monkeypatch):
+    """The symptom that exposed this: a downstream tool computed land area from the saved
+    GeoTIFF's transform while the layer used the requested box, and the two disagreed by 30%."""
+    import math
+
+    padded = (-88.28, 40.05, -88.16, 40.17)
+    out = _run(monkeypatch, np.full((100, 100), 220.0), served_bbox=padded)
+
+    b = out["region_bbox"]
+    mid = (b[1] + b[3]) / 2
+    area = ((b[2] - b[0]) * 111_320 * math.cos(math.radians(mid))) * ((b[3] - b[1]) * 110_540)
+    px = out["ground_resolution_m"]
+    assert abs(area / (px * px) - 100 * 100) / (100 * 100) < 0.25
 
 
 def test_it_returns_metres_not_only_a_picture(store, monkeypatch):
