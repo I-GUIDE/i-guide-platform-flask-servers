@@ -3200,6 +3200,15 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             # such NameError reached a merge in this repo and only 32 unit tests caught it.
             logger.exception("remote-sensing toolset failed to build; those tools are UNAVAILABLE "
                              "this turn")
+        # Elevation, on the same footing as the remote-sensing tools and for the same reason:
+        # the region can arrive as a bbox from the map, a point, or a boundary this turn just
+        # fetched, so gating it on an upload would hide it from every request that names a
+        # place. Unlike those tools it costs nothing to run — USGS 3DEP takes no credential.
+        try:
+            from agent_runtime.terrain_tools import make_terrain_tools
+            tools.extend(make_terrain_tools(default_input_file_ids=input_file_ids))
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
+            pass
         # Per-zone embeddings + the model fitted on them. These used to be gated on attached
         # files, because a polygon layer could only arrive by upload. admin_boundary can now
         # produce one from a place name mid-turn, so gating them here would hide the tool that
@@ -3691,6 +3700,15 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             # such NameError reached a merge in this repo and only 32 unit tests caught it.
             logger.exception("remote-sensing toolset failed to build; those tools are UNAVAILABLE "
                              "this turn")
+        # Elevation, on the same footing as the remote-sensing tools and for the same reason:
+        # the region can arrive as a bbox from the map, a point, or a boundary this turn just
+        # fetched, so gating it on an upload would hide it from every request that names a
+        # place. Unlike those tools it costs nothing to run — USGS 3DEP takes no credential.
+        try:
+            from agent_runtime.terrain_tools import make_terrain_tools
+            tools.extend(make_terrain_tools(default_input_file_ids=input_file_ids))
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
+            pass
         # Per-zone embeddings + the model fitted on them. These used to be gated on attached
         # files, because a polygon layer could only arrive by upload. admin_boundary can now
         # produce one from a place name mid-turn, so gating them here would hide the tool that

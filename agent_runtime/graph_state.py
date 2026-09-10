@@ -34,6 +34,12 @@ ANALYSIS_TOOL_NAMES: set[str] = {
     "qgis_metric_buffer",
     "pyqgis_layer_summary",
     "qgis_map_image",
+    # Elevation. Needs no credential and no attached file — the region can be a bbox, a point,
+    # or a boundary the same turn just fetched — so it belongs to the analysis intent rather
+    # than to the upload-gated set. On the supervisor path the peers get their tools directly
+    # and never consult this set; this entry is what keeps it from being stripped on the
+    # smart-routing path, where a name absent from every set is registered and unreachable.
+    "dem_for_region",
 }
 
 DISCOVERY_TOOL_NAMES: set[str] = {
