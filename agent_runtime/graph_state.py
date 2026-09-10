@@ -40,6 +40,14 @@ ANALYSIS_TOOL_NAMES: set[str] = {
     # and never consult this set; this entry is what keeps it from being stripped on the
     # smart-routing path, where a name absent from every set is registered and unreachable.
     "dem_for_region",
+    # The raster -> zone bridge. Its inputs are file_ids, but they are ones the same turn
+    # PRODUCED (a DEM, a boundary) rather than ones a user uploaded, so it is not upload-gated
+    # either; a turn that asks for elevation per tract reaches both of these or neither.
+    "zonal_stats_for_raster",
+    # Arithmetic on a DEM this deployment already fetched — no service, no credential, and the
+    # same reachability as dem_for_region, which is the tool a turn arrives at them through.
+    "terrain_derivative",
+    "inundation_at_level",
 }
 
 DISCOVERY_TOOL_NAMES: set[str] = {
