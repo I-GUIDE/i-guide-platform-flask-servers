@@ -232,38 +232,50 @@ export function foldTrace(trace: TraceLine[]): Row[] {
   return rows;
 }
 
+/** How many rows the transcript shows: one per fold row plus the rows folded under it. */
+export function visibleSteps(trace: TraceLine[]): number {
+  return foldTrace(trace).reduce((n, r) => n + 1 + (r.folded?.length || 0), 0);
+}
+
 // How much of a trace line shows before it is clamped. A traceback or a tool's argument dict
 // runs to hundreds of characters, and a transcript where every row is a paragraph is unreadable
 // — but the interesting half of a stack trace is the part that got cut. Clamped, clickable.
 const TRACE_CLAMP = 140;
 
 function TraceRow({ row }: { row: Row }) {
-  const [open, setOpen] = useState(false);
   const { line, folded } = row;
-  // Two reasons a row expands, and a row can have both: it is longer than the clamp, or it
-  // stands for a run of folded rows. Either way one click opens it.
   const long = line.text.length > TRACE_CLAMP;
   const run = folded?.length || 0;
+  // TWO independent states, because the two things a row can hide are not the same thing.
+  // A run of steps starts SHOWN: this trace is read to find out what the agent did, and a
+  // reader who has to click to see the steps is being asked to guess whether there is
+  // anything behind the click. Collapsing is the deliberate act, not expanding.
+  // A long message still starts CLAMPED — that one hides a 4000-char traceback or an argument
+  // dict, and printing those in full is what made the transcript unreadable to begin with.
+  const [openRun, setOpenRun] = useState(true);
+  const [openText, setOpenText] = useState(false);
+  const toggle = run > 0 ? () => setOpenRun((v) => !v) : () => setOpenText((v) => !v);
+  const open = run > 0 ? openRun : openText;
   const expandable = long || run > 0;
   const label = run > 0
-    ? (open ? 'Collapse these steps' : `Show ${run} more step${run === 1 ? '' : 's'}`)
-    : (open ? 'Collapse' : 'Show the whole message');
+    ? (openRun ? 'Collapse these steps' : `Show ${run} more step${run === 1 ? '' : 's'}`)
+    : (openText ? 'Collapse' : 'Show the whole message');
   return (
     <>
       <div
         className={`ln ${line.kind || ''}${expandable ? ' clampable' : ''}${open ? ' open' : ''}`}
-        onClick={expandable ? () => setOpen((v) => !v) : undefined}
+        onClick={expandable ? toggle : undefined}
         role={expandable ? 'button' : undefined}
         tabIndex={expandable ? 0 : undefined}
         onKeyDown={expandable ? (e) => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); }
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
         } : undefined}
         title={expandable ? label : undefined}
       >
-        {open || !long ? line.text : `${line.text.slice(0, TRACE_CLAMP)}…`}
-        {run > 0 && <span className="more">+{run}</span>}
+        {openText || !long ? line.text : `${line.text.slice(0, TRACE_CLAMP)}…`}
+        {run > 0 && <span className="more">{openRun ? `−${run}` : `+${run}`}</span>}
       </div>
-      {open && folded?.map((f, i) => (
+      {openRun && folded?.map((f, i) => (
         <div className={`ln ${f.kind || ''} sub`} key={i}>{f.text}</div>
       ))}
     </>
@@ -281,7 +293,10 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
         <details className="reason" open={m.streaming}>
           {/* The tally counts what is SHOWN. Counting the stored array called a turn with seven
               tool calls "28 steps", most of them the folded model lines. */}
-          <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${foldTrace(m.trace).length} steps`}</span><span className="chev">▾</span></summary>
+          {/* Counts what is SHOWN, and runs now show expanded — so this is every row again,
+              minus the folded model ladder. Counting the collapsed rows instead called a
+              fifteen-row transcript "7 steps" while fifteen rows sat under it. */}
+          <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${visibleSteps(m.trace)} steps`}</span><span className="chev">▾</span></summary>
           <div className="body">{foldTrace(m.trace).map((r, j) => <TraceRow key={j} row={r} />)}</div>
         </details>
       )}

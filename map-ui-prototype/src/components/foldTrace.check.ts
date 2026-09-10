@@ -7,7 +7,7 @@
  *
  * The fixture is a REAL turn, copied from the live trace on 2026-09-09 rather than invented,
  * because the thing being measured is how many rows a real turn renders. */
-import { foldTrace } from './ChatPanel';
+import { foldTrace, visibleSteps } from './ChatPanel';
 
 // The turn measured live on 2026-09-09: "Show me the city boundary of Savoy, Illinois."
 const savoy = [
@@ -60,6 +60,13 @@ const split = foldTrace([
   { text: 'n1', kind: 'node' }, { text: 'Asking m', kind: 'llm' }, { text: 'n2', kind: 'node' },
 ]);
 eq('a run is consecutive only', split.length, 3);
+
+// The tally must equal what is on screen. Runs render expanded, so that is every row the
+// fold kept — not the collapsed row count, which called a fifteen-row transcript "7 steps".
+eq('the tally counts every visible row', visibleSteps(savoy), 14);
+eq('  ...every stored row, this turn asking the model once', visibleSteps(savoy), savoy.length);
+eq('a second model line is excluded, being folded away', visibleSteps(
+  [...savoy, { text: 'Asking gpt-5.6-luna', kind: 'llm' }]), 14);
 
 console.log(bad ? `\n${bad} FAILED` : '\nall passed');
 process.exit(bad ? 1 : 0);
